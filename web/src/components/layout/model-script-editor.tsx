@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 import { PLUGIN_RETURNS, PLUGIN_TEMPLATES, PLUGIN_VARIABLES } from "@/services/api/model-plugin";
 import type { ModelCapability } from "@/stores/use-config-store";
 
-const capabilityLabels: Record<ModelCapability, string> = { image: "生图", video: "视频", text: "文本", audio: "音频" };
+const capabilityLabels: Record<ModelCapability, string> = { image: "生图", video: "视频", "video-analysis": "视频理解", text: "文本", audio: "音频" };
 
 function isDarkMode() {
     return typeof document !== "undefined" && document.documentElement.classList.contains("dark");
