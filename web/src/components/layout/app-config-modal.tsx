@@ -12,7 +12,7 @@ import { createModelChannel, modelOptionsFromChannels, normalizeModelOptionValue
 
 type ModelGroup = {
     capability: ModelCapability;
-    modelKey: "imageModel" | "videoModel" | "textModel" | "audioModel";
+    modelKey: "imageModel" | "videoModel" | "videoAnalysisModel" | "textModel" | "audioModel";
     defaultLabel: string;
 };
 
@@ -27,6 +27,7 @@ type WebdavDomainProgress = {
 const modelGroups: ModelGroup[] = [
     { capability: "image", modelKey: "imageModel", defaultLabel: "默认生图模型" },
     { capability: "video", modelKey: "videoModel", defaultLabel: "默认视频模型" },
+    { capability: "video-analysis", modelKey: "videoAnalysisModel", defaultLabel: "默认视频理解模型" },
     { capability: "text", modelKey: "textModel", defaultLabel: "默认文本模型" },
     { capability: "audio", modelKey: "audioModel", defaultLabel: "默认音频模型" },
 ];
@@ -341,6 +342,7 @@ function withChannels(config: AiConfig, channels: ModelChannel[]): AiConfig {
         ...next,
         imageModel: pickDefaultModel(next, "image", config.imageModel),
         videoModel: pickDefaultModel(next, "video", config.videoModel),
+        videoAnalysisModel: pickDefaultModel(next, "video-analysis", config.videoAnalysisModel),
         textModel: pickDefaultModel(next, "text", config.textModel),
         audioModel: pickDefaultModel(next, "audio", config.audioModel),
     };

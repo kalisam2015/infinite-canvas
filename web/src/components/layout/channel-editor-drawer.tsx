@@ -14,6 +14,7 @@ const apiFormatOptions: Array<{ label: string; value: ApiCallFormat }> = [
 const capabilityOptions: Array<{ label: string; value: ModelCapability }> = [
     { label: "生图", value: "image" },
     { label: "视频", value: "video" },
+    { label: "视频理解", value: "video-analysis" },
     { label: "文本", value: "text" },
     { label: "音频", value: "audio" },
 ];

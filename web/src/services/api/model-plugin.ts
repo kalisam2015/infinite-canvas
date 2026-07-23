@@ -18,12 +18,23 @@ export type PluginHttp = {
 
 export type PluginPollOptions = { intervalMs?: number; timeoutMs?: number };
 
+export type PluginVideoInput = {
+    blob: Blob;
+    name: string;
+    type: string;
+    size: number;
+    width?: number;
+    height?: number;
+    durationMs?: number;
+};
+
 export type RunPluginArgs = {
     capability: ModelCapability;
     script: string;
     config: AiConfig;
     prompt?: string;
     images?: string[];
+    videos?: PluginVideoInput[];
     messages?: unknown[];
     params?: Record<string, unknown>;
     signal?: AbortSignal;
@@ -118,6 +129,7 @@ export async function runModelPlugin<T = unknown>(args: RunPluginArgs): Promise<
     const runner = new Function(
         "prompt",
         "images",
+        "videos",
         "messages",
         "params",
         "model",
@@ -136,6 +148,7 @@ export async function runModelPlugin<T = unknown>(args: RunPluginArgs): Promise<
         return await runner(
             args.prompt || "",
             args.images || [],
+            args.videos || [],
             args.messages || [],
             args.params || {},
             config.model,
@@ -161,6 +174,7 @@ export type PluginVariable = { name: string; type: string; desc: string; capabil
 
 /** Documentation surface shown in the script editor. */
 export const PLUGIN_VARIABLES: PluginVariable[] = [
+    { name: "videos", type: "PluginVideoInput[]", desc: "视频理解输入，包含 blob、name、type、size 和媒体元信息", capabilities: ["video-analysis"] },
     { name: "prompt", type: "string", desc: "用户输入的提示词（已拼接系统提示词）", capabilities: ["image", "video", "audio"] },
     { name: "images", type: "string[]", desc: "参考图，dataURL 数组（改图 / 图生视频时有值）", capabilities: ["image", "video"] },
     { name: "messages", type: "{ role, content }[]", desc: "对话消息数组，含系统消息", capabilities: ["text"] },
@@ -182,6 +196,7 @@ export const PLUGIN_RETURNS: Record<ModelCapability, string> = {
     video: "脚本内部完成轮询，返回 { url } 或 { blob } 或视频 URL 字符串",
     audio: "返回 Blob，或 base64 / dataURL 字符串，或 { b64_json } / { data } / { url }",
     text: "用 onDelta(text) 推送流式，最终 return 完整文本字符串",
+    "video-analysis": "返回结构化视频分析对象或 JSON 字符串，至少包含 shots 数组",
 };
 
 export type PluginTemplate = { label: string; script: string };
@@ -350,6 +365,12 @@ const data = await request({
 const text = data.candidates?.[0]?.content?.parts?.map((p) => p.text || "").join("") || "";
 onDelta(text);
 return text;`,
+        },
+    ],
+    "video-analysis": [
+        {
+            label: "通用上传接口",
+            script: `// 将整段视频上传给你的分析接口，并返回 JSON 或 JSON 字符串。\n// 可用：videos[0].blob、videos[0].name、prompt、model、baseUrl、apiKey、request、poll\nif (!videos.length) throw new Error("缺少视频输入");\nconst form = new FormData();\nform.append("video", videos[0].blob, videos[0].name);\nform.append("prompt", prompt);\nreturn await request({\n  method: "post",\n  url: \`\${baseUrl}/v1/video-analysis\`,\n  headers: { Authorization: \`Bearer \${apiKey}\` },\n  data: form,\n});`,
         },
     ],
 };

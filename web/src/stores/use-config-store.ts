@@ -4,7 +4,7 @@ import { persist } from "zustand/middleware";
 import { nanoid } from "nanoid";
 
 export type ApiCallFormat = "openai" | "gemini";
-export type ModelCapability = "image" | "video" | "text" | "audio";
+export type ModelCapability = "image" | "video" | "text" | "audio" | "video-analysis";
 
 export type ChannelModel = {
     name: string;
@@ -30,6 +30,7 @@ export type AiConfig = {
     model: string;
     imageModel: string;
     videoModel: string;
+    videoAnalysisModel: string;
     textModel: string;
     audioModel: string;
     audioVoice: string;
@@ -86,6 +87,7 @@ export const defaultConfig: AiConfig = {
     model: "default::gpt-image-2",
     imageModel: "default::gpt-image-2",
     videoModel: "default::grok-imagine-video",
+    videoAnalysisModel: "",
     textModel: "default::gpt-5.5",
     audioModel: "default::gpt-4o-mini-tts",
     audioVoice: "alloy",
@@ -221,6 +223,7 @@ export const useConfigStore = create<ConfigStore>()(
                         models,
                         imageModel: normalizeModelOptionValue(config.imageModel || config.model, channels),
                         videoModel: normalizeModelOptionValue(config.videoModel, channels),
+                        videoAnalysisModel: normalizeModelOptionValue(config.videoAnalysisModel, channels),
                         textModel: normalizeModelOptionValue(config.textModel || config.model, channels),
                         audioModel: normalizeModelOptionValue(config.audioModel || defaultConfig.audioModel, channels),
                         audioVoice: config.audioVoice || defaultConfig.audioVoice,
@@ -348,7 +351,7 @@ function normalizeChannels(config: AiConfig) {
                 baseUrl: config.baseUrl || defaultConfig.baseUrl,
                 apiKey: config.apiKey || "",
                 apiFormat: config.apiFormat || defaultConfig.apiFormat,
-                models: normalizeChannelModels([config.model, config.imageModel, config.videoModel, config.textModel, config.audioModel].map(modelOptionName)),
+                models: normalizeChannelModels([config.model, config.imageModel, config.videoModel, config.videoAnalysisModel, config.textModel, config.audioModel].map(modelOptionName)),
             }),
         );
     }
