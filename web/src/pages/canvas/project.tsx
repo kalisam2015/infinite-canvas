@@ -7,6 +7,7 @@ import { saveAs } from "file-saver";
 import { requestEdit, requestGeneration, requestImageQuestion } from "@/services/api/image";
 import { requestAudioGeneration, storeGeneratedAudio } from "@/services/api/audio";
 import { requestVideoGeneration, storeGeneratedVideo } from "@/services/api/video";
+import { analyzeVideoStoryboard } from "@/services/api/video-analysis";
 import { defaultConfig, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
 import { uploadImage } from "@/services/image-storage";
 import { uploadMediaFile } from "@/services/file-storage";
@@ -30,6 +31,7 @@ import { CanvasNodeSplitDialog, type CanvasImageSplitParams } from "@/components
 import { CanvasNodeUpscaleDialog, type CanvasImageUpscaleParams } from "@/components/canvas/canvas-node-upscale-dialog";
 import { buildNodeGenerationContext, buildNodeGenerationInputs, buildNodeResponseMessages, hydrateNodeGenerationContext, type NodeGenerationInput } from "@/components/canvas/canvas-node-generation";
 import { CanvasNodeHoverToolbar, CanvasNodeInfoModal } from "@/components/canvas/canvas-node-hover-toolbar";
+import { CanvasVideoStoryboardDialog } from "@/components/canvas/canvas-video-storyboard-dialog";
 import { InfiniteCanvas } from "@/components/canvas/infinite-canvas";
 import { Minimap } from "@/components/canvas/canvas-mini-map";
 import { CanvasNode } from "@/components/canvas/canvas-node";
@@ -44,6 +46,7 @@ import { useAgentBridge } from "@/pages/canvas/hooks/use-agent-bridge";
 import { usePluginHost } from "@/pages/canvas/hooks/use-plugin-host";
 import { buildNodeMentionReferences, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
+import { buildVideoStoryboardGraph } from "@/lib/canvas/video-storyboard";
 import { applyNodeConfigPatch, audioMetadata, buildAudioGenerationMetadata, buildImageGenerationMetadata, createCanvasNode, imageMetadata, videoMetadata } from "@/lib/canvas/canvas-node-factory";
 import { findContainingGroupId, findGroupDropTarget, getConnectionTargetAnchor, isHiddenBatchChild, isHiddenBatchConnectionEndpoint, normalizeConnection, snapNodesIntoGroup } from "@/lib/canvas/canvas-node-geometry";
 import {
@@ -228,6 +231,11 @@ function InfiniteCanvasPage() {
     const [editRequestNonce, setEditRequestNonce] = useState(0);
     const [infoNodeId, setInfoNodeId] = useState<string | null>(null);
     const [pluginManagerOpen, setPluginManagerOpen] = useState(false);
+    const [storyboardNodeId, setStoryboardNodeId] = useState<string | null>(null);
+    const [storyboardModel, setStoryboardModel] = useState(effectiveConfig.videoAnalysisModel);
+    const [storyboardRewrite, setStoryboardRewrite] = useState("");
+    const [storyboardLoading, setStoryboardLoading] = useState(false);
+    const [storyboardError, setStoryboardError] = useState("");
     const [cropNodeId, setCropNodeId] = useState<string | null>(null);
     const [maskEditNodeId, setMaskEditNodeId] = useState<string | null>(null);
     const [splitNodeId, setSplitNodeId] = useState<string | null>(null);
@@ -254,6 +262,9 @@ function InfiniteCanvasPage() {
     const selectionBoxRef = useRef(selectionBox);
     const pendingConnectionCreateRef = useRef(pendingConnectionCreate);
     const generationRequestsRef = useRef(new Map<string, CanvasGenerationRequest>());
+    const storyboardControllerRef = useRef<AbortController | null>(null);
+
+    useEffect(() => () => storyboardControllerRef.current?.abort(), []);
 
     const createHistoryEntry = useCallback(
         (): CanvasHistoryEntry => ({
@@ -581,6 +592,7 @@ function InfiniteCanvasPage() {
     const singleSelectedNodeId = selectedNodeIds.size === 1 ? Array.from(selectedNodeIds)[0] : null;
     const toolbarNode = (toolbarNodeId ? nodeById.get(toolbarNodeId) || null : null) || (singleSelectedNodeId ? nodeById.get(singleSelectedNodeId) || null : null);
     const infoNode = infoNodeId ? nodeById.get(infoNodeId) || null : null;
+    const storyboardNode = storyboardNodeId ? nodeById.get(storyboardNodeId) || null : null;
     const cropNode = cropNodeId ? nodeById.get(cropNodeId) || null : null;
     const maskEditNode = maskEditNodeId ? nodeById.get(maskEditNodeId) || null : null;
     const splitNode = splitNodeId ? nodeById.get(splitNodeId) || null : null;
@@ -1312,6 +1324,53 @@ function InfiniteCanvasPage() {
         setSelectedNodeIds(new Set([id]));
         setSelectedConnectionId(null);
         setDialogNodeId(id);
+    }, []);
+
+    const openVideoStoryboard = useCallback((node: CanvasNodeData) => {
+        if (node.type !== CanvasNodeType.Video || !node.metadata?.content) {
+            message.warning("视频节点为空，无法反推分镜");
+            return;
+        }
+        storyboardControllerRef.current?.abort();
+        setStoryboardNodeId(node.id);
+        setStoryboardModel(effectiveConfig.videoAnalysisModel);
+        setStoryboardRewrite("");
+        setStoryboardError("");
+    }, [effectiveConfig.videoAnalysisModel, message]);
+
+    const runVideoStoryboard = useCallback(async () => {
+        if (!storyboardNode) return;
+        storyboardControllerRef.current?.abort();
+        const controller = new AbortController();
+        storyboardControllerRef.current = controller;
+        setStoryboardLoading(true);
+        setStoryboardError("");
+        try {
+            const result = await analyzeVideoStoryboard(effectiveConfig, storyboardNode, { model: storyboardModel, rewriteInstruction: storyboardRewrite, signal: controller.signal });
+            const graph = buildVideoStoryboardGraph({ source: storyboardNode, storyboard: result, config: effectiveConfig });
+            setNodes((prev) => [...prev, ...graph.nodes]);
+            setConnections((prev) => [...prev, ...graph.connections]);
+            if (graph.selectedNodeId) {
+                setSelectedNodeIds(new Set([graph.selectedNodeId]));
+                setDialogNodeId(graph.selectedNodeId);
+            }
+            setStoryboardNodeId(null);
+            message.success(`已生成 ${result.shots.length} 个分镜节点`);
+        } catch (error) {
+            if (controller.signal.aborted) return;
+            setStoryboardError(error instanceof Error ? error.message : String(error));
+        } finally {
+            if (storyboardControllerRef.current === controller) storyboardControllerRef.current = null;
+            setStoryboardLoading(false);
+        }
+    }, [effectiveConfig, message, storyboardModel, storyboardNode, storyboardRewrite]);
+
+    const cancelVideoStoryboard = useCallback(() => {
+        storyboardControllerRef.current?.abort();
+        storyboardControllerRef.current = null;
+        setStoryboardLoading(false);
+        setStoryboardNodeId(null);
+        setStoryboardError("");
     }, []);
 
     const createAudioFileNode = useCallback(async (file: File, position: Position) => {
@@ -2877,6 +2936,7 @@ function InfiniteCanvasPage() {
                     onViewImage={(node) => setPreviewNodeId(node.id)}
                     onReversePrompt={createImageReversePromptNodes}
                     onRetry={(node) => void handleRetryNode(node)}
+                    onReverseStoryboard={openVideoStoryboard}
                     onToggleFreeResize={(node) => toggleNodeFreeResize(node.id)}
                     onDelete={(node) => deleteNodes(new Set([node.id]))}
                 />
@@ -2931,6 +2991,20 @@ function InfiniteCanvasPage() {
                 <input ref={imageInputRef} type="file" accept="image/*,video/*,audio/mpeg,audio/wav,audio/x-wav,.mp3,.wav" className="hidden" onChange={handleImageInputChange} />
 
                 <CanvasNodeInfoModal node={infoNode} open={Boolean(infoNode)} onClose={() => setInfoNodeId(null)} />
+                <CanvasVideoStoryboardDialog
+                    open={Boolean(storyboardNode)}
+                    node={storyboardNode}
+                    config={effectiveConfig}
+                    model={storyboardModel}
+                    rewriteInstruction={storyboardRewrite}
+                    loading={storyboardLoading}
+                    error={storyboardError}
+                    onModelChange={setStoryboardModel}
+                    onRewriteChange={setStoryboardRewrite}
+                    onSubmit={() => void runVideoStoryboard()}
+                    onCancel={cancelVideoStoryboard}
+                    onOpenConfig={() => openConfigDialog(false, "channels")}
+                />
                 <CanvasPluginManagerModal open={pluginManagerOpen} onClose={() => setPluginManagerOpen(false)} />
 
                 {cropNode?.metadata?.content ? <CanvasNodeCropDialog dataUrl={cropNode.metadata.content} open={Boolean(cropNode)} onClose={() => setCropNodeId(null)} onConfirm={(crop) => void cropImageNode(cropNode!, crop)} /> : null}
