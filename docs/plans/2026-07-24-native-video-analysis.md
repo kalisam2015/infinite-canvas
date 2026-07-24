@@ -1,5 +1,7 @@
 # Native GPT-5.6 Video Analysis Implementation Plan
 
+> Superseded: OpenAI Responses `input_file` does not accept MP4. Native video analysis now uses the Doubao Chat API `video_url` Base64 protocol implemented in `web/src/services/api/model-plugin.ts`.
+
 > **For Codex:** REQUIRED SUB-SKILL: Use `executing-plans` to implement this plan task-by-task.
 
 **Goal:** Make long-video reverse storyboarding submit the complete MP4 to GPT-5.6 through the standard Responses API `input_file` input, without keyframe extraction or private video endpoints.
@@ -70,4 +72,3 @@
 
 1. Stage only the implementation files and documentation changed by these tasks.
 2. Commit with `feat: use Responses input_file for native video analysis`.
-

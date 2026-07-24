@@ -1,5 +1,7 @@
 # GPT-5.6 原生视频反推设计
 
+> 已废弃：OpenAI Responses `input_file` 的官方文件类型不包含 MP4。本项目改用豆包 Chat API 的 `video_url` Base64 视频输入；实现以 `web/src/services/api/model-plugin.ts` 中的豆包视频理解模板为准。
+
 ## 目标
 
 让长视频反推功能通过 OpenAI Responses API 的标准文件输入，将完整 MP4 直接交给 GPT-5.6 Sol 进行多模态理解，不在浏览器内抽取关键帧或转写音频。

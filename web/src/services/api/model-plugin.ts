@@ -203,6 +203,41 @@ export const PLUGIN_RETURNS: Record<ModelCapability, string> = {
 
 export type PluginTemplate = { label: string; script: string };
 
+export const DOUBAO_VIDEO_ANALYSIS_SCRIPT = `// 豆包视频理解 Chat API：完整视频使用 video_url Base64 传入，不拆帧。
+// 可用：videos[0].blob、videos[0].name、prompt、model、baseUrl、apiKey、request
+if (!videos.length) throw new Error("缺少视频输入");
+if (videos[0].size > 48 * 1024 * 1024) throw new Error("豆包 Base64 视频输入需小于 48 MB，请改用 Files API 或视频 URL");
+const fileData = await new Promise((resolve, reject) => {
+  const reader = new FileReader();
+  reader.onload = () => resolve(reader.result);
+  reader.onerror = () => reject(reader.error || new Error("视频读取失败"));
+  reader.readAsDataURL(videos[0].blob);
+});
+const data = await request({
+  method: "post",
+  url: \`\${baseUrl}/v1/chat/completions\`,
+  headers: { "Content-Type": "application/json", Authorization: \`Bearer \${apiKey}\` },
+  data: {
+    model,
+    messages: [{
+      role: "user",
+      content: [
+        { type: "video_url", video_url: { url: fileData, fps: 0.3 } },
+        { type: "text", text: prompt },
+      ],
+    }],
+    max_tokens: 4096,
+  },
+});
+const content = data.choices?.[0]?.message?.content;
+const text = typeof content === "string" ? content : Array.isArray(content) ? content.map((item) => item.text || "").join("") : "";
+if (!text) throw new Error(\`豆包 Chat API 未返回文本：\${JSON.stringify(data).slice(0, 1000)}\`);
+return text;`;
+
+export function defaultVideoAnalysisScriptForModel(modelName: string) {
+    return /doubao/i.test(modelName) ? DOUBAO_VIDEO_ANALYSIS_SCRIPT : "";
+}
+
 export const PLUGIN_TEMPLATES: Record<ModelCapability, PluginTemplate[]> = {
     image: [
         {
@@ -371,8 +406,8 @@ return text;`,
     ],
     "video-analysis": [
         {
-            label: "OpenAI Responses 原生文件输入",
-            script: `// GPT-5.6 原生文件理解：将完整视频作为 Responses input_file 提交，不拆帧。\n// 可用：videos[0].blob、videos[0].name、prompt、model、baseUrl、apiKey、request\nif (!videos.length) throw new Error("缺少视频输入");\nconst fileData = await new Promise((resolve, reject) => {\n  const reader = new FileReader();\n  reader.onload = () => resolve(reader.result);\n  reader.onerror = () => reject(reader.error || new Error("视频读取失败"));\n  reader.readAsDataURL(videos[0].blob);\n});\nconst data = await request({\n  method: "post",\n  url: \`\${baseUrl}/v1/responses\`,\n  headers: { "Content-Type": "application/json", Authorization: \`Bearer \${apiKey}\` },\n  data: {\n    model,\n    input: [{\n      role: "user",\n      content: [\n        { type: "input_file", filename: videos[0].name, file_data: fileData, detail: "auto" },\n        { type: "input_text", text: prompt },\n      ],\n    }],\n  },\n});\nconst text = data.output_text\n  || (data.output || []).flatMap((item) => item.content || []).map((item) => item.text || "").join("")\n  || "";\nif (!text) throw new Error(\`Responses 未返回文本：\${JSON.stringify(data).slice(0, 1000)}\`);\nreturn text;`,
+            label: "豆包 Chat API 视频输入",
+            script: DOUBAO_VIDEO_ANALYSIS_SCRIPT,
         },
     ],
 };
