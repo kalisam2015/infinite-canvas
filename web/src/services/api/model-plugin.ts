@@ -166,7 +166,9 @@ export async function runModelPlugin<T = unknown>(args: RunPluginArgs): Promise<
         if (error instanceof DOMException && error.name === "AbortError") throw error;
         if (axios.isCancel(error)) throw error;
         const message = error instanceof Error ? error.message : String(error);
-        throw new Error(`模型调用脚本执行失败：${message}`);
+        const responseData = axios.isAxiosError(error) ? error.response?.data : undefined;
+        const detail = responseData == null ? "" : typeof responseData === "string" ? responseData : JSON.stringify(responseData);
+        throw new Error(`模型调用脚本执行失败：${message}${detail ? `；接口响应：${detail.slice(0, 1000)}` : ""}`);
     }
 }
 
@@ -175,7 +177,7 @@ export type PluginVariable = { name: string; type: string; desc: string; capabil
 /** Documentation surface shown in the script editor. */
 export const PLUGIN_VARIABLES: PluginVariable[] = [
     { name: "videos", type: "PluginVideoInput[]", desc: "视频理解输入，包含 blob、name、type、size 和媒体元信息", capabilities: ["video-analysis"] },
-    { name: "prompt", type: "string", desc: "用户输入的提示词（已拼接系统提示词）", capabilities: ["image", "video", "audio"] },
+    { name: "prompt", type: "string", desc: "用户输入的提示词（已拼接系统提示词）", capabilities: ["image", "video", "video-analysis", "audio"] },
     { name: "images", type: "string[]", desc: "参考图，dataURL 数组（改图 / 图生视频时有值）", capabilities: ["image", "video"] },
     { name: "messages", type: "{ role, content }[]", desc: "对话消息数组，含系统消息", capabilities: ["text"] },
     { name: "params", type: "object", desc: "生成参数：生图 {size,quality,count}、视频 {seconds,size,resolution,ratio,generateAudio,watermark}、音频 {voice,format,speed,instructions}" },
@@ -369,8 +371,8 @@ return text;`,
     ],
     "video-analysis": [
         {
-            label: "通用上传接口",
-            script: `// 将整段视频上传给你的分析接口，并返回 JSON 或 JSON 字符串。\n// 可用：videos[0].blob、videos[0].name、prompt、model、baseUrl、apiKey、request、poll\nif (!videos.length) throw new Error("缺少视频输入");\nconst form = new FormData();\nform.append("video", videos[0].blob, videos[0].name);\nform.append("prompt", prompt);\nreturn await request({\n  method: "post",\n  url: \`\${baseUrl}/v1/video-analysis\`,\n  headers: { Authorization: \`Bearer \${apiKey}\` },\n  data: form,\n});`,
+            label: "OpenAI Responses 原生文件输入",
+            script: `// GPT-5.6 原生文件理解：将完整视频作为 Responses input_file 提交，不拆帧。\n// 可用：videos[0].blob、videos[0].name、prompt、model、baseUrl、apiKey、request\nif (!videos.length) throw new Error("缺少视频输入");\nconst fileData = await new Promise((resolve, reject) => {\n  const reader = new FileReader();\n  reader.onload = () => resolve(reader.result);\n  reader.onerror = () => reject(reader.error || new Error("视频读取失败"));\n  reader.readAsDataURL(videos[0].blob);\n});\nconst data = await request({\n  method: "post",\n  url: \`\${baseUrl}/v1/responses\`,\n  headers: { "Content-Type": "application/json", Authorization: \`Bearer \${apiKey}\` },\n  data: {\n    model,\n    input: [{\n      role: "user",\n      content: [\n        { type: "input_file", filename: videos[0].name, file_data: fileData, detail: "auto" },\n        { type: "input_text", text: prompt },\n      ],\n    }],\n  },\n});\nconst text = data.output_text\n  || (data.output || []).flatMap((item) => item.content || []).map((item) => item.text || "").join("")\n  || "";\nif (!text) throw new Error(\`Responses 未返回文本：\${JSON.stringify(data).slice(0, 1000)}\`);\nreturn text;`,
         },
     ],
 };

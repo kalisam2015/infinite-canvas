@@ -10,6 +10,7 @@ export type ChannelModel = {
     name: string;
     capability: ModelCapability;
     script?: string;
+    videoAnalysisScript?: string;
 };
 
 export type ModelChannel = {
@@ -156,17 +157,25 @@ export function modelCapabilityOf(config: AiConfig, value: string): ModelCapabil
 
 export function modelMatchesCapability(config: AiConfig, value: string, capability?: ModelCapability) {
     if (!capability) return true;
-    return modelCapabilityOf(config, value) === capability;
+    const model = findChannelModel(config, value)?.model;
+    if (!model) return false;
+    if (capability === "video-analysis") return model.capability === "video-analysis" || model.capability === "text" || Boolean(model.videoAnalysisScript);
+    return model.capability === capability;
 }
 
 export function selectableModelsByCapability(config: AiConfig, capability?: ModelCapability) {
     if (!capability) return config.models;
-    return config.channels.flatMap((channel) => channel.models.filter((model) => model.capability === capability).map((model) => encodeChannelModel(channel.id, model.name)));
+    return config.channels.flatMap((channel) => channel.models.filter((model) => capability === "video-analysis" ? model.capability === "video-analysis" || model.capability === "text" || Boolean(model.videoAnalysisScript) : model.capability === capability).map((model) => encodeChannelModel(channel.id, model.name)));
 }
 
 /** The user script (if any) attached to a model; empty string means use the system default call. */
 export function resolveModelScript(config: AiConfig, value: string) {
     return findChannelModel(config, value)?.model.script?.trim() || "";
+}
+
+export function resolveVideoAnalysisScript(config: AiConfig, value: string) {
+    const model = findChannelModel(config, value)?.model;
+    return model?.videoAnalysisScript?.trim() || (model?.capability === "video-analysis" ? model.script?.trim() || "" : "");
 }
 
 function isAiConfigReady(config: AiConfig, model: string) {
@@ -257,7 +266,8 @@ export function normalizeChannelModels(models: Array<string | ChannelModel> | un
         seen.add(name);
         const capability = typeof item === "string" ? guessCapability(name) : item.capability || guessCapability(name);
         const script = typeof item === "string" ? undefined : item.script?.trim() || undefined;
-        result.push({ name, capability, script });
+        const videoAnalysisScript = typeof item === "string" ? undefined : item.videoAnalysisScript?.trim() || undefined;
+        result.push({ name, capability, script, videoAnalysisScript });
     }
     return result;
 }

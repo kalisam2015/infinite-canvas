@@ -1,7 +1,7 @@
 import { getMediaBlob } from "@/services/file-storage";
 import { runModelPlugin } from "@/services/api/model-plugin";
 import { parseVideoStoryboardResponse } from "@/lib/canvas/video-storyboard";
-import { resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
+import { resolveModelRequestConfig, resolveVideoAnalysisScript, type AiConfig } from "@/stores/use-config-store";
 import type { CanvasNodeData } from "@/types/canvas";
 
 const ANALYSIS_PROMPT = `请完整分析上传的长视频，并只返回一个 JSON 对象，不要输出 Markdown 或解释。
@@ -21,7 +21,7 @@ shots：按时间排序的镜头数组
 export async function analyzeVideoStoryboard(config: AiConfig, node: CanvasNodeData, options?: { model?: string; rewriteInstruction?: string; signal?: AbortSignal }) {
     const model = options?.model || config.videoAnalysisModel;
     if (!model) throw new Error("请先配置视频理解模型");
-    const script = resolveModelScript(config, model);
+    const script = resolveVideoAnalysisScript(config, model);
     if (!script) throw new Error("请先为视频理解模型配置调用脚本");
     const blob = await readVideoBlob(node);
     const requestConfig = resolveModelRequestConfig(config, model);
