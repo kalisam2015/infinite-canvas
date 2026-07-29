@@ -1,7 +1,7 @@
 import { type ReactNode } from "react";
 
 import { ImageSettingsTheme } from "@/components/image-settings-panel";
-import { audioFormatOptions, audioSpeedLabel, audioVoiceOptions, normalizeAudioFormatValue, normalizeAudioSpeedValue, normalizeAudioVoiceValue } from "@/lib/audio-generation";
+import { audioFormatOptions, audioSpeedLabel, audioVoiceOptionsForModel, normalizeAudioFormatValue, normalizeAudioSpeedValue, normalizeAudioVoiceValue } from "@/lib/audio-generation";
 import { type CanvasTheme } from "@/lib/canvas-theme";
 import type { AiConfig } from "@/stores/use-config-store";
 
@@ -18,7 +18,9 @@ type AudioSettingsPanelProps = {
 };
 
 export function AudioSettingsPanel({ config, onConfigChange, theme, showTitle = true, className = "w-[320px] space-y-4 rounded-2xl px-1 py-0.5" }: AudioSettingsPanelProps) {
-    const voice = normalizeAudioVoiceValue(config.audioVoice);
+    const model = config.model || config.audioModel;
+    const voiceOptions = audioVoiceOptionsForModel(model);
+    const voice = normalizeAudioVoiceValue(config.audioVoice, model);
     const format = normalizeAudioFormatValue(config.audioFormat);
     const speed = normalizeAudioSpeedValue(config.audioSpeed);
 
@@ -28,7 +30,7 @@ export function AudioSettingsPanel({ config, onConfigChange, theme, showTitle = 
                 {showTitle ? <div className="text-lg font-semibold">音频设置</div> : null}
                 <SettingGroup title="声音" color={theme.node.muted}>
                     <div className="grid grid-cols-3 gap-2.5">
-                        {audioVoiceOptions.map((item) => (
+                        {voiceOptions.map((item) => (
                             <OptionPill key={item.value} selected={voice === item.value} theme={theme} onClick={() => onConfigChange("audioVoice", item.value)}>
                                 {item.label}
                             </OptionPill>

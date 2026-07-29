@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { ChevronRight, Group, Image as ImageIcon, Music2, Puzzle, RefreshCw, Star, Video } from "lucide-react";
+import { Modal } from "antd";
+import { ChevronRight, Clock3, Group, Image as ImageIcon, Music2, Puzzle, RefreshCw, Star, Video } from "lucide-react";
 
 import { canvasThemes } from "@/lib/canvas-theme";
 import { formatBytes } from "@/lib/image-utils";
@@ -629,6 +630,9 @@ function VideoNodeContent({ node, theme }: NodeContentRendererProps) {
 }
 
 function AudioNodeContent({ node, theme }: NodeContentRendererProps) {
+    const [timelineOpen, setTimelineOpen] = useState(false);
+    const timeline = node.metadata?.audioTimeline;
+    const words = timeline?.words.filter((word) => word.text && Number.isFinite(word.startMs) && Number.isFinite(word.endMs)) || [];
     if (!node.metadata?.content)
         return (
             <div className="flex h-full w-full flex-col items-center justify-center gap-2" style={{ color: theme.node.placeholder }}>
@@ -640,11 +644,75 @@ function AudioNodeContent({ node, theme }: NodeContentRendererProps) {
         <div className="flex h-full w-full flex-col justify-center gap-3 px-4" style={{ background: theme.node.fill, color: theme.node.text }}>
             <div className="flex min-w-0 items-center gap-2 text-sm opacity-70">
                 <Music2 className="size-4 shrink-0" />
-                <span className="truncate">音频</span>
+                <span className="min-w-0 flex-1 truncate">音频</span>
+                {words.length ? (
+                    <button
+                        type="button"
+                        className="flex shrink-0 items-center gap-1 bg-transparent px-1.5 py-1 text-xs opacity-65 transition hover:bg-black/5 hover:opacity-100 dark:hover:bg-white/10"
+                        data-canvas-no-zoom
+                        onMouseDown={(event) => event.stopPropagation()}
+                        onClick={(event) => {
+                            event.stopPropagation();
+                            setTimelineOpen(true);
+                        }}
+                    >
+                        <Clock3 className="size-3.5" />
+                        字词时间轴
+                    </button>
+                ) : null}
             </div>
             <audio src={node.metadata.content} controls className="w-full" data-canvas-no-zoom />
+            <Modal
+                title="字词时间轴"
+                open={timelineOpen}
+                footer={null}
+                width={720}
+                centered
+                destroyOnHidden
+                modalRender={(content) => <div data-canvas-no-zoom onMouseDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>{content}</div>}
+                onCancel={() => setTimelineOpen(false)}
+            >
+                <div className="space-y-4" style={{ color: theme.node.text }}>
+                    <div className="text-xs opacity-50">{words.length} 个字词 · 时间相对音频起点</div>
+                    {node.metadata?.narrationShotCount !== undefined ? (
+                        <div className="border-y py-3 text-sm" style={{ borderColor: theme.toolbar.border }}>
+                            <div>已应用 {node.metadata.narrationAlignedCount || 0}/{node.metadata.narrationShotCount} 个视频分镜</div>
+                            {node.metadata.narrationAlignmentIssues?.length ? (
+                                <div className="mt-2 space-y-1 text-xs opacity-60">
+                                    {node.metadata.narrationAlignmentIssues.map((issue) => <div key={`${issue.index}-${issue.reason}`}>分镜 {String(issue.index + 1).padStart(2, "0")}：{issue.reason}</div>)}
+                                </div>
+                            ) : null}
+                        </div>
+                    ) : null}
+                    {timeline?.text ? <div className="max-h-28 overflow-y-auto whitespace-pre-wrap border-y py-3 text-sm leading-6" style={{ borderColor: theme.toolbar.border }}>{timeline.text}</div> : null}
+                    <div className="grid grid-cols-[minmax(0,1fr)_88px_88px_64px] gap-3 border-b pb-2 text-xs opacity-45" style={{ borderColor: theme.toolbar.border }}>
+                        <span>字词</span>
+                        <span>开始</span>
+                        <span>结束</span>
+                        <span>置信度</span>
+                    </div>
+                    <div className="max-h-[360px] divide-y overflow-y-auto" style={{ borderColor: theme.toolbar.border }}>
+                        {words.map((word, index) => (
+                            <div key={`${word.startMs}-${word.endMs}-${index}`} className="grid grid-cols-[minmax(0,1fr)_88px_88px_64px] gap-3 py-2 text-sm" style={{ borderColor: theme.toolbar.border }}>
+                                <span className="min-w-0 break-words">{word.text}</span>
+                                <span className="tabular-nums opacity-65">{formatAudioTimestamp(word.startMs)}</span>
+                                <span className="tabular-nums opacity-65">{formatAudioTimestamp(word.endMs)}</span>
+                                <span className="tabular-nums opacity-50">{word.confidence == null ? "-" : `${Math.round(word.confidence * 100)}%`}</span>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            </Modal>
         </div>
     );
+}
+
+function formatAudioTimestamp(value: number) {
+    const total = Math.max(0, Math.round(value));
+    const minutes = Math.floor(total / 60000);
+    const seconds = Math.floor((total % 60000) / 1000);
+    const millis = total % 1000;
+    return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${String(millis).padStart(3, "0")}`;
 }
 
 function ImageContent({

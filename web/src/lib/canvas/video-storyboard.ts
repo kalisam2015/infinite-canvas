@@ -13,6 +13,9 @@ export type VideoStoryboardShot = {
     action: string;
     dialogue: string;
     narration: string;
+    sourceNarrationStartMs?: number;
+    sourceNarrationEndMs?: number;
+    sourceNarrationTimingSource?: "model" | "deepgram";
     subtitle: string;
     soundEffect: string;
     transition: string;
@@ -66,17 +69,36 @@ export function normalizeVideoStoryboard(value: unknown, durationMs?: number): V
         rewrittenCopy: text(source.rewrittenCopy),
         titles: stringArray(source.titles || source.title),
         hashtags: stringArray(source.hashtags || source.topics),
-        shots: mergeShortShots(splitLongShots(normalized)),
+        shots: splitLongShots(mergeShortShots(normalized)),
     };
 }
 
 export function storyboardShotSeconds(shot: VideoStoryboardShot) {
-    return String(Math.max(2, Math.min(15, Math.round((shot.endMs - shot.startMs) / 1000))));
+    return String(Math.max(4, Math.min(15, Math.round((shot.endMs - shot.startMs) / 1000))));
+}
+
+export function applySourceAsrTimeline(storyboard: VideoStoryboard, words: Array<{ text: string; startMs: number; endMs: number; confidence?: number }>): VideoStoryboard {
+    return {
+        ...storyboard,
+        shots: storyboard.shots.map((shot) => {
+            const overlapping = words.filter((word) => word.endMs > shot.startMs && word.startMs < shot.endMs);
+            if (!overlapping.length) return shot;
+            const hasNarration = Boolean(shot.dialogue || shot.narration);
+            return {
+                ...shot,
+                narration: hasNarration ? shot.narration : overlapping.map((word) => word.text).join(""),
+                sourceNarrationStartMs: Math.max(shot.startMs, overlapping[0].startMs),
+                sourceNarrationEndMs: Math.min(shot.endMs, overlapping[overlapping.length - 1].endMs),
+                sourceNarrationTimingSource: "deepgram",
+            };
+        }),
+    };
 }
 
 export function buildVideoStoryboardGraph({ source, storyboard, config }: { source: CanvasNodeData; storyboard: VideoStoryboard; config: AiConfig }) {
     const nodes: CanvasNodeData[] = [];
     const connections: CanvasConnection[] = [];
+    const storyboardId = nanoid();
     const x = source.position.x + source.width + gap;
     let y = source.position.y;
     const addText = (title: string, content: string, position: { x: number; y: number }) => {
@@ -84,8 +106,8 @@ export function buildVideoStoryboardGraph({ source, storyboard, config }: { sour
         nodes.push({ ...node, title });
         return node;
     };
-    const addConfig = (title: string, metadata: NonNullable<CanvasNodeData["metadata"]>, position: { x: number; y: number }) => {
-        const node = createCanvasNode(CanvasNodeType.Config, { x: position.x + configSize.width / 2, y: position.y + configSize.height / 2 }, metadata);
+    const addConfig = (title: string, metadata: NonNullable<CanvasNodeData["metadata"]>, position: { x: number; y: number }, height = configSize.height) => {
+        const node = { ...createCanvasNode(CanvasNodeType.Config, { x: position.x + configSize.width / 2, y: position.y + height / 2 }, metadata), height };
         nodes.push({ ...node, title });
         return node;
     };
@@ -102,7 +124,7 @@ export function buildVideoStoryboardGraph({ source, storyboard, config }: { sour
     const audioText = storyboard.shots.map((shot) => [shot.dialogue, shot.narration].filter(Boolean).join("\n")).filter(Boolean).join("\n\n");
     if (audioText) {
         const audioSource = addText("台词与旁白", audioText, { x, y });
-        const audioConfig = addConfig("音频生成配置", { generationMode: "audio", model: config.audioModel, prompt: audioText, status: "idle" }, { x: x + textSize.width + gap, y });
+        const audioConfig = addConfig("音频生成配置", { generationMode: "audio", model: config.audioModel, prompt: "", status: "idle", storyboardId, audioVoice: config.audioVoice, audioFormat: config.audioFormat, audioSpeed: config.audioSpeed, audioInstructions: config.audioInstructions }, { x: x + textSize.width + gap, y });
         connections.push({ id: nanoid(), fromNodeId: audioSource.id, toNodeId: audioConfig.id });
         y += Math.max(textSize.height, configSize.height) + gap;
     }
@@ -116,13 +138,24 @@ export function buildVideoStoryboardGraph({ source, storyboard, config }: { sour
             seconds: storyboardShotSeconds(shot),
             size: typeof shot.videoParams.size === "string" ? shot.videoParams.size : config.size,
             vquality: typeof shot.videoParams.resolution === "string" ? shot.videoParams.resolution : config.vquality,
-            generateAudio: typeof shot.videoParams.generateAudio === "string" ? shot.videoParams.generateAudio : config.videoGenerateAudio,
+            generateAudio: "false",
             watermark: typeof shot.videoParams.watermark === "string" ? shot.videoParams.watermark : config.videoWatermark,
             prompt: shot.generationPrompt,
+            narrationText: [shot.dialogue, shot.narration].filter(Boolean).join("\n"),
+            sourceStartMs: shot.startMs,
+            sourceEndMs: shot.endMs,
+            sourceNarrationStartMs: shot.sourceNarrationStartMs,
+            sourceNarrationEndMs: shot.sourceNarrationEndMs,
+            sourceNarrationTimingSource: shot.sourceNarrationTimingSource || (shot.sourceNarrationStartMs !== undefined && shot.sourceNarrationEndMs !== undefined ? "model" : undefined),
+            narrationAlignmentStatus: "pending",
+            storyboardId,
+            subtitleText: shot.subtitle || [shot.dialogue, shot.narration].filter(Boolean).join("\n"),
+            storyboardShotIndex: index,
+            transitionText: shot.transition,
             status: "idle",
-        }, { x: x + textSize.width + gap, y });
+        }, { x: x + textSize.width + gap, y }, 300);
         connections.push({ id: nanoid(), fromNodeId: textNode.id, toNodeId: videoNode.id });
-        y += Math.max(textSize.height, configSize.height) + gap;
+        y += Math.max(textSize.height, videoNode.height) + gap;
     });
 
     return { nodes, connections, selectedNodeId: nodes.at(-1)?.id };
@@ -134,6 +167,8 @@ function normalizeShot(value: unknown, durationMs?: number): VideoStoryboardShot
     const startMs = Math.max(0, number(source.startMs ?? source.start ?? 0));
     const endMs = Math.min(durationMs || Number.MAX_SAFE_INTEGER, Math.max(startMs, number(source.endMs ?? source.end ?? startMs + 2000)));
     if (endMs <= startMs) return null;
+    const narrationText = [text(source.dialogue), text(source.narration)].filter(Boolean).join("\n");
+    const sourceNarration = narrationText ? normalizeNarrationBounds(source.sourceNarrationStartMs, source.sourceNarrationEndMs, startMs, endMs) : null;
     return {
         startMs,
         endMs,
@@ -142,6 +177,9 @@ function normalizeShot(value: unknown, durationMs?: number): VideoStoryboardShot
         action: text(source.action),
         dialogue: text(source.dialogue),
         narration: text(source.narration),
+        sourceNarrationStartMs: sourceNarration?.startMs,
+        sourceNarrationEndMs: sourceNarration?.endMs,
+        sourceNarrationTimingSource: sourceNarration ? "model" : undefined,
         subtitle: text(source.subtitle),
         soundEffect: text(source.soundEffect || source.sfx),
         transition: text(source.transition),
@@ -153,17 +191,17 @@ function normalizeShot(value: unknown, durationMs?: number): VideoStoryboardShot
 function mergeShortShots(shots: VideoStoryboardShot[]) {
     const result: VideoStoryboardShot[] = [];
     shots.forEach((shot) => {
-        if (shot.endMs - shot.startMs >= 2000 || !result.length) {
+        if (shot.endMs - shot.startMs >= 4000 || !result.length) {
             result.push(shot);
             return;
         }
         const previous = result[result.length - 1];
-        result[result.length - 1] = { ...previous, endMs: shot.endMs, visual: [previous.visual, shot.visual].filter(Boolean).join("\n"), action: [previous.action, shot.action].filter(Boolean).join("\n"), dialogue: [previous.dialogue, shot.dialogue].filter(Boolean).join("\n"), narration: [previous.narration, shot.narration].filter(Boolean).join("\n"), generationPrompt: [previous.generationPrompt, shot.generationPrompt].filter(Boolean).join("；") };
+        result[result.length - 1] = { ...previous, ...mergeSourceNarration(previous, shot), endMs: shot.endMs, visual: [previous.visual, shot.visual].filter(Boolean).join("\n"), action: [previous.action, shot.action].filter(Boolean).join("\n"), dialogue: [previous.dialogue, shot.dialogue].filter(Boolean).join("\n"), narration: [previous.narration, shot.narration].filter(Boolean).join("\n"), generationPrompt: [previous.generationPrompt, shot.generationPrompt].filter(Boolean).join("；") };
     });
-    if (result.length > 1 && result[0].endMs - result[0].startMs < 2000) {
+    if (result.length > 1 && result[0].endMs - result[0].startMs < 4000) {
         const first = result.shift()!;
         const next = result[0];
-        result[0] = { ...next, startMs: first.startMs, visual: [first.visual, next.visual].filter(Boolean).join("\n"), action: [first.action, next.action].filter(Boolean).join("\n"), dialogue: [first.dialogue, next.dialogue].filter(Boolean).join("\n"), narration: [first.narration, next.narration].filter(Boolean).join("\n"), generationPrompt: [first.generationPrompt, next.generationPrompt].filter(Boolean).join("；") };
+        result[0] = { ...next, ...mergeSourceNarration(first, next), startMs: first.startMs, visual: [first.visual, next.visual].filter(Boolean).join("\n"), action: [first.action, next.action].filter(Boolean).join("\n"), dialogue: [first.dialogue, next.dialogue].filter(Boolean).join("\n"), narration: [first.narration, next.narration].filter(Boolean).join("\n"), generationPrompt: [first.generationPrompt, next.generationPrompt].filter(Boolean).join("；") };
     }
     return result;
 }
@@ -173,12 +211,33 @@ function splitLongShots(shots: VideoStoryboardShot[]) {
         const duration = shot.endMs - shot.startMs;
         if (duration <= 15000) return [shot];
         const count = Math.ceil(duration / 15000);
-        return Array.from({ length: count }, (_, index) => ({ ...shot, startMs: shot.startMs + (duration * index) / count, endMs: shot.startMs + (duration * (index + 1)) / count }));
+        return Array.from({ length: count }, (_, index) => {
+            const startMs = shot.startMs + (duration * index) / count;
+            const endMs = shot.startMs + (duration * (index + 1)) / count;
+            const sourceNarration = normalizeNarrationBounds(shot.sourceNarrationStartMs, shot.sourceNarrationEndMs, startMs, endMs);
+            return { ...shot, startMs, endMs, sourceNarrationStartMs: sourceNarration?.startMs, sourceNarrationEndMs: sourceNarration?.endMs };
+        });
     });
 }
 
 function formatShot(shot: VideoStoryboardShot) {
-    return [`时间码：${formatTime(shot.startMs)} - ${formatTime(shot.endMs)}`, `画面：${shot.visual}`, `景别/运镜：${shot.camera}`, `人物动作：${shot.action}`, `台词/旁白：${[shot.dialogue, shot.narration].filter(Boolean).join("\n")}`, `字幕/音效：${[shot.subtitle, shot.soundEffect].filter(Boolean).join(" / ")}`, `转场：${shot.transition}`, `生成提示词：${shot.generationPrompt}`].join("\n");
+    const sourceNarration = shot.sourceNarrationStartMs !== undefined && shot.sourceNarrationEndMs !== undefined ? `${formatTime(shot.sourceNarrationStartMs)} - ${formatTime(shot.sourceNarrationEndMs)}` : "未识别";
+    const sourceLabel = shot.sourceNarrationTimingSource === "deepgram" ? "Deepgram 校准" : "模型估算";
+    return [`时间码：${formatTime(shot.startMs)} - ${formatTime(shot.endMs)}`, `原片口播（${sourceLabel}）：${sourceNarration}`, `画面：${shot.visual}`, `景别/运镜：${shot.camera}`, `人物动作：${shot.action}`, `台词/旁白：${[shot.dialogue, shot.narration].filter(Boolean).join("\n")}`, `字幕/音效：${[shot.subtitle, shot.soundEffect].filter(Boolean).join(" / ")}`, `转场：${shot.transition}`, `生成提示词：${shot.generationPrompt}`].join("\n");
+}
+
+function mergeSourceNarration(first: VideoStoryboardShot, second: VideoStoryboardShot) {
+    const starts = [first.sourceNarrationStartMs, second.sourceNarrationStartMs].filter((value): value is number => value !== undefined);
+    const ends = [first.sourceNarrationEndMs, second.sourceNarrationEndMs].filter((value): value is number => value !== undefined);
+    const sourceNarrationTimingSource = first.sourceNarrationTimingSource === "deepgram" || second.sourceNarrationTimingSource === "deepgram" ? "deepgram" as const : "model" as const;
+    return starts.length && ends.length ? { sourceNarrationStartMs: Math.min(...starts), sourceNarrationEndMs: Math.max(...ends), sourceNarrationTimingSource } : { sourceNarrationStartMs: undefined, sourceNarrationEndMs: undefined, sourceNarrationTimingSource: undefined };
+}
+
+function normalizeNarrationBounds(startValue: unknown, endValue: unknown, shotStartMs: number, shotEndMs: number) {
+    if (startValue === undefined || startValue === null || startValue === "" || endValue === undefined || endValue === null || endValue === "") return null;
+    const startMs = Math.max(shotStartMs, Math.min(shotEndMs, number(startValue)));
+    const endMs = Math.max(shotStartMs, Math.min(shotEndMs, number(endValue)));
+    return endMs > startMs ? { startMs, endMs } : null;
 }
 
 function extractJson(value: string) {

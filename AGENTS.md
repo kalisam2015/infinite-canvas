@@ -59,6 +59,8 @@
 ## 文档规范
 
 - README 保持简洁，只放项目介绍、核心功能、快速开始和文档入口。
+- `docs/plans/2026-07-25-画布视频反推与再创作设计.md` 是后续视频反推、分镜生成、逐镜头生成、旁白时间轴和成片合成工作的设计基准；相关工作开始前必须先阅读并遵循该文档。
+- 相关设计思路发生变化时，必须在同一任务中更新上述设计文档；更新前先审查全文与现有方案是否冲突，直接修改、合并或删除过时内容，保持文档自洽，不要只在末尾持续追加新内容或同时保留互相冲突的方案。
 - `docs/index.md` 放给 AI 使用的文档索引，不要再放到 `docs/content/docs/` 内容目录里。
 - 详细功能介绍写到 `docs/content/docs/overview/features.mdx`。
 - 后续待办写到 `docs/content/docs/progress/todo.mdx`。
@@ -81,4 +83,7 @@
 
 - 当前画布项目和“我的素材”主要保存在浏览器本地，不要在文档中误写成已支持云同步。
 - 当前 AI API Key 存在浏览器本地，并由前端直接请求 OpenAI 兼容接口；涉及安全说明时要写清楚。
+- 原片 ASR 默认通过 Windows 本地媒体服务接收浏览器 Blob 并代理 Deepgram，不要求用户把本地视频上传为公网 URL；Deepgram Key 只保存到本地媒体服务配置，不写入画布项目。
+- Seedance 原生视频能力通过独立的渠道级 `seedance` 协议配置，固定调用 `/contents/generations/tasks` 并传递 `generate_audio`；不要仅根据模型名称或把 Seedance 专属字段当成 OpenAI 标准字段。
 - Docker 静态资源路径目前仍是待办项，文档中不要过度承诺生产部署已经完全验证。
+- OpenMontage 不属于当前项目架构、运行链路或部署依赖，不要将其源码、Pipeline、Skills、Checkpoint、Backlot 或 Agent Runtime 合并进项目；只有用户明确要求重新评估时，才可将 `G:\getinfo\OpenMontage` 作为外部参考读取。

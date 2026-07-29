@@ -10,7 +10,7 @@ import { requestVideoGeneration, storeGeneratedVideo } from "@/services/api/vide
 import { analyzeVideoStoryboard } from "@/services/api/video-analysis";
 import { defaultConfig, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
 import { uploadImage } from "@/services/image-storage";
-import { uploadMediaFile } from "@/services/file-storage";
+import { deleteStoredMedia, getMediaBlob, uploadMediaFile } from "@/services/file-storage";
 import { nanoid } from "nanoid";
 import { getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
 import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
@@ -29,9 +29,10 @@ import { CanvasNodeCropDialog, type CanvasImageCropRect } from "@/components/can
 import { CanvasNodeMaskEditDialog, type CanvasImageMaskEditPayload } from "@/components/canvas/canvas-node-mask-edit-dialog";
 import { CanvasNodeSplitDialog, type CanvasImageSplitParams } from "@/components/canvas/canvas-node-split-dialog";
 import { CanvasNodeUpscaleDialog, type CanvasImageUpscaleParams } from "@/components/canvas/canvas-node-upscale-dialog";
-import { buildNodeGenerationContext, buildNodeGenerationInputs, buildNodeResponseMessages, hydrateNodeGenerationContext, type NodeGenerationInput } from "@/components/canvas/canvas-node-generation";
+import { buildNodeGenerationContext, buildNodeGenerationInputs, buildNodeResponseMessages, hydrateNodeGenerationContext, stripUpstreamTextFromPrompt, type NodeGenerationInput } from "@/components/canvas/canvas-node-generation";
 import { CanvasNodeHoverToolbar, CanvasNodeInfoModal } from "@/components/canvas/canvas-node-hover-toolbar";
 import { CanvasVideoStoryboardDialog } from "@/components/canvas/canvas-video-storyboard-dialog";
+import { CanvasVideoComposeDialog } from "@/components/canvas/canvas-video-compose-dialog";
 import { InfiniteCanvas } from "@/components/canvas/infinite-canvas";
 import { Minimap } from "@/components/canvas/canvas-mini-map";
 import { CanvasNode } from "@/components/canvas/canvas-node";
@@ -46,7 +47,9 @@ import { useAgentBridge } from "@/pages/canvas/hooks/use-agent-bridge";
 import { usePluginHost } from "@/pages/canvas/hooks/use-plugin-host";
 import { buildNodeMentionReferences, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
-import { buildVideoStoryboardGraph } from "@/lib/canvas/video-storyboard";
+import { applySourceAsrTimeline, buildVideoStoryboardGraph } from "@/lib/canvas/video-storyboard";
+import { alignStoryboardNarration, compileNarrationTimeline, compileWordNarrationTimeline, formatNarrationTimeline, type NarrationTimeline, type StoryboardNarrationAlignment } from "@/lib/canvas/video-narration-timeline";
+import { analyzeNarrationTimeline, checkLocalMediaService, composeVideosLocally, configureLocalDeepgram, fetchVideoThroughLocalService, isVideoComposeRunActive, loadLocalMediaServiceConfig, saveLocalMediaServiceConfig, sortVideoComposeNodes, transcribeMediaLocally, type LocalMediaServiceConfig } from "@/services/local-video-compose";
 import { applyNodeConfigPatch, audioMetadata, buildAudioGenerationMetadata, buildImageGenerationMetadata, createCanvasNode, imageMetadata, videoMetadata } from "@/lib/canvas/canvas-node-factory";
 import { findContainingGroupId, findGroupDropTarget, getConnectionTargetAnchor, isHiddenBatchChild, isHiddenBatchConnectionEndpoint, normalizeConnection, snapNodesIntoGroup } from "@/lib/canvas/canvas-node-geometry";
 import {
@@ -75,6 +78,7 @@ import { CanvasTopBar } from "@/components/canvas/canvas-top-bar";
 import { ConnectionCreateMenu, NodeCreateMenu, type PendingConnectionCreate } from "@/components/canvas/canvas-create-menus";
 import {
     CanvasNodeType,
+    type AudioTimeline,
     type CanvasAssistantImage,
     type CanvasAssistantSession,
     type CanvasConnection,
@@ -133,6 +137,26 @@ const IMAGE_PROMPT_REVERSE_PRESET = `请根据参考图片反推一段适合用�
 1. 只输出提示词正文，不要解释。
 2. 覆盖主体、构图、风格、光线、色彩、材质、镜头和氛围。
 3. 尽量写成可直接用于生图模型的完整提示词。`;
+
+function buildStoryboardAudioTimelineUpdates(nodes: CanvasNodeData[], storyboardId: string | undefined, audioTimeline: AudioTimeline | undefined, durationMs: number | undefined) {
+    if (!storyboardId || !audioTimeline?.words.length) return null;
+    const configs = nodes
+        .filter((node) => node.metadata?.storyboardId === storyboardId && node.metadata?.generationMode === "video")
+        .sort((a, b) => (a.metadata?.storyboardShotIndex ?? 0) - (b.metadata?.storyboardShotIndex ?? 0));
+    return alignStoryboardNarration({ shots: configs.map((node) => ({ id: node.id, text: node.metadata?.narrationText || "" })), durationMs: durationMs || 0, words: audioTimeline.words });
+}
+
+function applyStoryboardAudioTimeline(nodes: CanvasNodeData[], alignment: StoryboardNarrationAlignment | null) {
+    if (!alignment) return nodes;
+    return nodes.map((node) => {
+        const update = alignment.updates.get(node.id);
+        return update ? { ...node, metadata: { ...node.metadata, narrationStartMs: update.narrationStartMs, narrationEndMs: update.narrationEndMs, seconds: update.seconds || node.metadata?.seconds, narrationAlignmentStatus: update.status, narrationAlignmentError: update.error } } : node;
+    });
+}
+
+function narrationAlignmentMetadata(alignment: StoryboardNarrationAlignment | null) {
+    return alignment ? { narrationAlignedCount: alignment.matchedCount, narrationShotCount: alignment.shotCount, narrationAlignmentIssues: alignment.issues } : {};
+}
 
 export default function CanvasPage() {
     const [mounted, setMounted] = useState(false);
@@ -236,6 +260,14 @@ function InfiniteCanvasPage() {
     const [storyboardRewrite, setStoryboardRewrite] = useState("");
     const [storyboardLoading, setStoryboardLoading] = useState(false);
     const [storyboardError, setStoryboardError] = useState("");
+    const [storyboardAsrEnabled, setStoryboardAsrEnabled] = useState(() => Boolean(loadLocalMediaServiceConfig().token));
+    const [storyboardDeepgramKey, setStoryboardDeepgramKey] = useState("");
+    const [composeVideos, setComposeVideos] = useState<CanvasNodeData[]>([]);
+    const [composeNarration, setComposeNarration] = useState<CanvasNodeData | null>(null);
+    const [composeServiceConfig, setComposeServiceConfig] = useState<LocalMediaServiceConfig>(loadLocalMediaServiceConfig);
+    const [composeLoading, setComposeLoading] = useState(false);
+    const [composeProgress, setComposeProgress] = useState(0);
+    const [composeError, setComposeError] = useState("");
     const [cropNodeId, setCropNodeId] = useState<string | null>(null);
     const [maskEditNodeId, setMaskEditNodeId] = useState<string | null>(null);
     const [splitNodeId, setSplitNodeId] = useState<string | null>(null);
@@ -263,8 +295,24 @@ function InfiniteCanvasPage() {
     const pendingConnectionCreateRef = useRef(pendingConnectionCreate);
     const generationRequestsRef = useRef(new Map<string, CanvasGenerationRequest>());
     const storyboardControllerRef = useRef<AbortController | null>(null);
+    const composeControllerRef = useRef<AbortController | null>(null);
+    const activeProjectIdRef = useRef(projectId);
 
-    useEffect(() => () => storyboardControllerRef.current?.abort(), []);
+    useEffect(() => () => {
+        storyboardControllerRef.current?.abort();
+        composeControllerRef.current?.abort();
+    }, []);
+
+    useEffect(() => {
+        activeProjectIdRef.current = projectId;
+        composeControllerRef.current?.abort();
+        composeControllerRef.current = null;
+        setComposeLoading(false);
+        setComposeVideos([]);
+        setComposeNarration(null);
+        setComposeError("");
+        setComposeProgress(0);
+    }, [projectId]);
 
     const createHistoryEntry = useCallback(
         (): CanvasHistoryEntry => ({
@@ -1336,6 +1384,7 @@ function InfiniteCanvasPage() {
         setStoryboardModel(effectiveConfig.videoAnalysisModel);
         setStoryboardRewrite("");
         setStoryboardError("");
+        setStoryboardDeepgramKey("");
     }, [effectiveConfig.videoAnalysisModel, message]);
 
     const runVideoStoryboard = useCallback(async () => {
@@ -1346,7 +1395,25 @@ function InfiniteCanvasPage() {
         setStoryboardLoading(true);
         setStoryboardError("");
         try {
-            const result = await analyzeVideoStoryboard(effectiveConfig, storyboardNode, { model: storyboardModel, rewriteInstruction: storyboardRewrite, signal: controller.signal });
+            const analysisPromise = analyzeVideoStoryboard(effectiveConfig, storyboardNode, { model: storyboardModel, rewriteInstruction: storyboardRewrite, signal: controller.signal });
+            const transcriptionPromise = storyboardAsrEnabled ? (async () => {
+                saveLocalMediaServiceConfig(composeServiceConfig);
+                const health = await checkLocalMediaService(composeServiceConfig);
+                if (!health.ffmpegAvailable) throw new Error("本地媒体服务未找到 FFmpeg");
+                if (storyboardDeepgramKey.trim()) await configureLocalDeepgram(composeServiceConfig, { apiKey: storyboardDeepgramKey.trim(), model: "nova-3", language: "zh" });
+                let blob = storyboardNode.metadata?.storageKey ? await getMediaBlob(storyboardNode.metadata.storageKey) : null;
+                if (!blob && storyboardNode.metadata?.content) {
+                    if (/^https?:/i.test(storyboardNode.metadata.content)) blob = await fetchVideoThroughLocalService(composeServiceConfig, storyboardNode.metadata.content, { signal: controller.signal });
+                    else {
+                        const response = await fetch(storyboardNode.metadata.content, { signal: controller.signal });
+                        if (response.ok) blob = await response.blob();
+                    }
+                }
+                if (!blob) throw new Error("无法读取原视频用于 Deepgram 校准");
+                return await transcribeMediaLocally(composeServiceConfig, { name: storyboardNode.title || "source.mp4", blob }, { signal: controller.signal });
+            })().then((value) => ({ value, error: "" })).catch((error) => ({ value: null, error: error instanceof Error ? error.message : String(error) })) : Promise.resolve(null);
+            const [analyzed, transcription] = await Promise.all([analysisPromise, transcriptionPromise]);
+            const result = transcription?.value?.words.length ? applySourceAsrTimeline(analyzed, transcription.value.words) : analyzed;
             const graph = buildVideoStoryboardGraph({ source: storyboardNode, storyboard: result, config: effectiveConfig });
             setNodes((prev) => [...prev, ...graph.nodes]);
             setConnections((prev) => [...prev, ...graph.connections]);
@@ -1356,6 +1423,8 @@ function InfiniteCanvasPage() {
             }
             setStoryboardNodeId(null);
             message.success(`已生成 ${result.shots.length} 个分镜节点`);
+            if (transcription?.error) message.warning(`Deepgram 校准失败，已保留模型估算：${transcription.error}`);
+            else if (storyboardAsrEnabled && !transcription?.value?.words.length) message.warning("Deepgram 未返回有效字词时间戳，已保留模型估算");
         } catch (error) {
             if (controller.signal.aborted) return;
             setStoryboardError(error instanceof Error ? error.message : String(error));
@@ -1363,7 +1432,7 @@ function InfiniteCanvasPage() {
             if (storyboardControllerRef.current === controller) storyboardControllerRef.current = null;
             setStoryboardLoading(false);
         }
-    }, [effectiveConfig, message, storyboardModel, storyboardNode, storyboardRewrite]);
+    }, [composeServiceConfig, effectiveConfig, message, storyboardAsrEnabled, storyboardDeepgramKey, storyboardModel, storyboardNode, storyboardRewrite]);
 
     const cancelVideoStoryboard = useCallback(() => {
         storyboardControllerRef.current?.abort();
@@ -1371,6 +1440,131 @@ function InfiniteCanvasPage() {
         setStoryboardLoading(false);
         setStoryboardNodeId(null);
         setStoryboardError("");
+    }, []);
+
+    const openVideoCompose = useCallback((media: CanvasNodeData[]) => {
+        const targets = sortVideoComposeNodes(media.filter((node) => node.type === CanvasNodeType.Video && Boolean(node.metadata?.content)));
+        const narration = media.filter((node) => node.type === CanvasNodeType.Audio && Boolean(node.metadata?.content));
+        if (targets.length < 2) return message.warning("请至少选择两个已生成的视频");
+        if (narration.length > 1) return message.warning("统一旁白只能选择一个音频节点");
+        setComposeVideos(targets);
+        setComposeNarration(narration[0] || null);
+        setComposeProgress(0);
+        setComposeError("");
+    }, [message]);
+
+    const runVideoCompose = useCallback(async () => {
+        if (composeVideos.length < 2 || composeLoading) return;
+        composeControllerRef.current?.abort();
+        const controller = new AbortController();
+        const composeProjectId = projectId;
+        composeControllerRef.current = controller;
+        setComposeLoading(true);
+        setComposeProgress(0);
+        setComposeError("");
+        saveLocalMediaServiceConfig(composeServiceConfig);
+        try {
+            const health = await checkLocalMediaService(composeServiceConfig);
+            if (!health.ffmpegAvailable) throw new Error("本地媒体服务未找到 FFmpeg");
+            const clips = [] as Array<{ name: string; blob: Blob }>;
+            for (const [index, node] of composeVideos.entries()) {
+                setComposeProgress(Math.round(index / composeVideos.length * 20));
+                try {
+                    let blob = node.metadata?.storageKey ? await getMediaBlob(node.metadata.storageKey) : null;
+                    if (!blob && node.metadata?.content) {
+                        if (/^https?:/i.test(node.metadata.content)) blob = await fetchVideoThroughLocalService(composeServiceConfig, node.metadata.content, { signal: controller.signal });
+                        else {
+                            const response = await fetch(node.metadata.content, { signal: controller.signal });
+                            if (response.ok) blob = await response.blob();
+                        }
+                    }
+                    if (!blob) throw new Error("未找到可读取的视频文件");
+                    clips.push({ name: `${String(index + 1).padStart(3, "0")}.mp4`, blob });
+                } catch (error) {
+                    const detail = error instanceof Error ? error.message : String(error);
+                    const hint = detail === "Failed to fetch" ? `无法连接本地媒体服务 ${composeServiceConfig.url}` : detail;
+                    throw new Error(`读取第 ${index + 1} 个视频片段失败：${hint}`);
+                }
+            }
+            let timeline: NarrationTimeline | null = null;
+            let narrationOption: { name: string; blob: Blob; clipDurationsMs: number[] } | undefined;
+            if (composeNarration) {
+                let narrationBlob = composeNarration.metadata?.storageKey ? await getMediaBlob(composeNarration.metadata.storageKey) : null;
+                if (!narrationBlob && composeNarration.metadata?.content) {
+                    const response = await fetch(composeNarration.metadata.content, { signal: controller.signal });
+                    if (response.ok) narrationBlob = await response.blob();
+                }
+                if (!narrationBlob) throw new Error("无法读取统一旁白音频");
+                const audioTimeline = composeNarration.metadata?.audioTimeline;
+                const narrationText = audioTimeline?.text.trim() || composeNarration.metadata?.prompt?.trim();
+                if (!narrationText) throw new Error("统一旁白音频缺少对应的旁白文本");
+                const shotTexts = composeVideos.map((node) => node.metadata?.narrationText?.trim() || "");
+                if (audioTimeline?.words.length && shotTexts.every(Boolean)) {
+                    timeline = compileWordNarrationTimeline({ shotTexts, durationMs: composeNarration.metadata?.durationMs || 0, words: audioTimeline.words });
+                }
+                if (!timeline) {
+                    const analysis = await analyzeNarrationTimeline(composeServiceConfig, { name: composeNarration.title || "narration.mp3", blob: narrationBlob }, { signal: controller.signal });
+                    timeline = compileNarrationTimeline({ text: narrationText, durationMs: analysis.durationMs, silences: analysis.silences, expectedShotCount: composeVideos.length });
+                }
+                narrationOption = { name: composeNarration.title || "narration.mp3", blob: narrationBlob, clipDurationsMs: timeline.items.map((item) => item.shotEndMs - item.shotStartMs) };
+            }
+            const result = await composeVideosLocally(composeServiceConfig, clips, { signal: controller.signal, onProgress: setComposeProgress, narration: narrationOption });
+            if (!isVideoComposeRunActive(controller.signal, composeProjectId, activeProjectIdRef.current)) return;
+            const uploaded = await uploadMediaFile(result, "video");
+            if (!isVideoComposeRunActive(controller.signal, composeProjectId, activeProjectIdRef.current)) {
+                await deleteStoredMedia([uploaded.storageKey]);
+                return;
+            }
+            const nodeSize = fitNodeSize(uploaded.width || 1080, uploaded.height || 1920, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
+            const right = Math.max(...composeVideos.map((node) => node.position.x + node.width));
+            const top = Math.min(...composeVideos.map((node) => node.position.y));
+            const id = `video-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+            const finalNode: CanvasNodeData = {
+                id,
+                type: CanvasNodeType.Video,
+                title: "完整成片",
+                position: { x: right + 96, y: top },
+                width: nodeSize.width,
+                height: nodeSize.height,
+                metadata: { ...videoMetadata(uploaded), prompt: `${timeline ? "按统一旁白时间轴" : "按顺序"}合并 ${composeVideos.length} 个视频片段`, timelineJson: timeline ? JSON.stringify(timeline) : undefined, status: NODE_STATUS_SUCCESS },
+            };
+            const timelineNode = timeline
+                ? {
+                      ...createCanvasNode(CanvasNodeType.Text, { x: finalNode.position.x + NODE_DEFAULT_SIZE[CanvasNodeType.Text].width / 2, y: finalNode.position.y + finalNode.height + 96 + NODE_DEFAULT_SIZE[CanvasNodeType.Text].height / 2 }, { content: formatNarrationTimeline(timeline), prompt: formatNarrationTimeline(timeline), timelineJson: JSON.stringify(timeline), status: NODE_STATUS_SUCCESS, fontSize: 14 }),
+                      title: "成片时间轴",
+                  }
+                : null;
+            setNodes((prev) => [...prev, finalNode, ...(timelineNode ? [timelineNode] : [])]);
+            setConnections((prev) => [
+                ...prev,
+                ...composeVideos.map((node) => ({ id: nanoid(), fromNodeId: node.id, toNodeId: id })),
+                ...(composeNarration ? [{ id: nanoid(), fromNodeId: composeNarration.id, toNodeId: id }] : []),
+                ...(timelineNode ? [{ id: nanoid(), fromNodeId: id, toNodeId: timelineNode.id }] : []),
+            ]);
+            setSelectedNodeIds(new Set([id]));
+            setSelectedConnectionId(null);
+            setComposeVideos([]);
+            setComposeNarration(null);
+            message.success("视频合并完成");
+        } catch (error) {
+            if (controller.signal.aborted) return;
+            setComposeError(error instanceof Error ? error.message : String(error));
+        } finally {
+            if (composeControllerRef.current === controller) {
+                composeControllerRef.current = null;
+                setComposeLoading(false);
+            }
+        }
+    }, [composeLoading, composeNarration, composeServiceConfig, composeVideos, message, projectId]);
+
+    const cancelVideoCompose = useCallback(() => {
+        composeControllerRef.current?.abort();
+        composeControllerRef.current = null;
+        setComposeLoading(false);
+        setComposeVideos([]);
+        setComposeNarration(null);
+        setComposeError("");
+        setComposeProgress(0);
     }, []);
 
     const createAudioFileNode = useCallback(async (file: File, position: Position) => {
@@ -2100,7 +2294,11 @@ function InfiniteCanvasPage() {
                 return;
             }
             const markSourceStatus = sourceNode?.type !== CanvasNodeType.Image && !editingTextNode;
-            const statusPrompt = sourceNode?.type === CanvasNodeType.Config ? effectivePrompt : prompt;
+            const upstreamText = buildNodeGenerationInputs(nodeId, nodesRef.current, connectionsRef.current)
+                .map((input) => input.text)
+                .filter(Boolean)
+                .join("\n\n");
+            const statusPrompt = sourceNode?.type === CanvasNodeType.Config && !sourceNode.metadata?.composerContent?.trim() ? stripUpstreamTextFromPrompt(prompt, upstreamText) : prompt;
             if (!effectivePrompt && (mode === "text" || mode === "audio")) {
                 finishGenerationRequest(nodeId, runController);
                 setRunningNodeId(null);
@@ -2298,6 +2496,19 @@ function InfiniteCanvasPage() {
                             generateAudio: generationConfig.videoGenerateAudio,
                             watermark: generationConfig.videoWatermark,
                             references: generationReferenceUrls(generationContext),
+                            narrationText: sourceNode?.metadata?.narrationText,
+                            sourceStartMs: sourceNode?.metadata?.sourceStartMs,
+                            sourceEndMs: sourceNode?.metadata?.sourceEndMs,
+                            sourceNarrationStartMs: sourceNode?.metadata?.sourceNarrationStartMs,
+                            sourceNarrationEndMs: sourceNode?.metadata?.sourceNarrationEndMs,
+                            narrationStartMs: sourceNode?.metadata?.narrationStartMs,
+                            narrationEndMs: sourceNode?.metadata?.narrationEndMs,
+                            narrationAlignmentStatus: sourceNode?.metadata?.narrationAlignmentStatus,
+                            narrationAlignmentError: sourceNode?.metadata?.narrationAlignmentError,
+                            subtitleText: sourceNode?.metadata?.subtitleText,
+                            storyboardId: sourceNode?.metadata?.storyboardId,
+                            storyboardShotIndex: sourceNode?.metadata?.storyboardShotIndex,
+                            transitionText: sourceNode?.metadata?.transitionText,
                         },
                     };
                     pendingChildIds = [videoId];
@@ -2332,6 +2543,18 @@ function InfiniteCanvasPage() {
                                               generateAudio: generationConfig.videoGenerateAudio,
                                               watermark: generationConfig.videoWatermark,
                                               references: generationReferenceUrls(generationContext),
+                                              narrationText: sourceNode?.metadata?.narrationText,
+                                              sourceStartMs: sourceNode?.metadata?.sourceStartMs,
+                                              sourceEndMs: sourceNode?.metadata?.sourceEndMs,
+                                              sourceNarrationStartMs: sourceNode?.metadata?.sourceNarrationStartMs,
+                                              sourceNarrationEndMs: sourceNode?.metadata?.sourceNarrationEndMs,
+                                              narrationStartMs: sourceNode?.metadata?.narrationStartMs,
+                                              narrationEndMs: sourceNode?.metadata?.narrationEndMs,
+                                              narrationAlignmentStatus: sourceNode?.metadata?.narrationAlignmentStatus,
+                                              narrationAlignmentError: sourceNode?.metadata?.narrationAlignmentError,
+                                              subtitleText: sourceNode?.metadata?.subtitleText,
+                                              storyboardShotIndex: sourceNode?.metadata?.storyboardShotIndex,
+                                              transitionText: sourceNode?.metadata?.transitionText,
                                           },
                                       }
                                     : node,
@@ -2355,7 +2578,7 @@ function InfiniteCanvasPage() {
                         position: isEmptyAudioNode ? sourceNode.position : { x: parent.x + (sourceNode?.width || spec.width) + 96, y: parent.y + ((sourceNode?.height || spec.height) - spec.height) / 2 },
                         width: isEmptyAudioNode ? sourceNode.width : spec.width,
                         height: isEmptyAudioNode ? sourceNode.height : spec.height,
-                        metadata: { prompt: effectivePrompt, status: NODE_STATUS_LOADING, ...buildAudioGenerationMetadata(generationConfig) },
+                        metadata: { prompt: effectivePrompt, status: NODE_STATUS_LOADING, storyboardId: sourceNode?.metadata?.storyboardId, ...buildAudioGenerationMetadata(generationConfig) },
                     };
                     pendingChildIds = [audioId];
                     setNodes((prev) =>
@@ -2366,8 +2589,15 @@ function InfiniteCanvasPage() {
                     if (!isEmptyAudioNode) setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: nodeId, toNodeId: audioId }]);
                     const controller = startGenerationRequest(audioId, nodeId, nodeId, runController);
                     try {
-                        const audio = await storeGeneratedAudio(await requestAudioGeneration(generationConfig, effectivePrompt, { signal: controller.signal }), generationConfig.audioFormat);
-                        setNodes((prev) => prev.map((node) => (node.id === audioId ? { ...node, metadata: { ...node.metadata, ...audioMetadata(audio), prompt: effectivePrompt, ...buildAudioGenerationMetadata(generationConfig) } } : node)));
+                        const generatedAudio = await requestAudioGeneration(generationConfig, effectivePrompt, { signal: controller.signal });
+                        const audio = await storeGeneratedAudio(generatedAudio.blob, generationConfig.audioFormat);
+                        const storyboardId = sourceNode?.metadata?.storyboardId;
+                        const alignment = buildStoryboardAudioTimelineUpdates(nodesRef.current, storyboardId, generatedAudio.timeline, audio.durationMs);
+                        setNodes((prev) => applyStoryboardAudioTimeline(prev.map((node) => (node.id === audioId ? { ...node, metadata: { ...node.metadata, ...audioMetadata(audio, generatedAudio.timeline), ...narrationAlignmentMetadata(alignment), prompt: effectivePrompt, ...buildAudioGenerationMetadata(generationConfig) } } : node)), alignment));
+                        if (storyboardId && generatedAudio.timeline?.words.length) {
+                            if (alignment?.matchedCount) message.success(`已将字词时间轴应用到 ${alignment.matchedCount}/${alignment.shotCount} 个视频分镜`);
+                            else message.warning(`字词时间轴已应用 0/${alignment?.shotCount || 0} 个分镜，请查看对齐状态`);
+                        }
                     } finally {
                         finishGenerationRequest(audioId, controller);
                     }
@@ -2450,6 +2680,20 @@ function InfiniteCanvasPage() {
     useEffect(() => {
         generateNodeRef.current = handleGenerateNode;
     }, [handleGenerateNode]);
+
+    const runBatchGenerate = useCallback(
+        async (targets: CanvasNodeData[]) => {
+            const eligible = targets.filter((node) => node.type === CanvasNodeType.Config && node.metadata?.status !== NODE_STATUS_LOADING);
+            if (!eligible.length) return;
+            const results = await Promise.allSettled(
+                eligible.map((node) => handleGenerateNode(node.id, (node.metadata?.generationMode as CanvasNodeGenerationMode) || "image", node.metadata?.composerContent ?? node.metadata?.prompt ?? "")),
+            );
+            const failed = results.filter((result) => result.status === "rejected").length;
+            if (failed) message.error(`${failed}/${eligible.length} 个配置生成失败`);
+            else message.success(`已触发 ${eligible.length} 个配置生成`);
+        },
+        [handleGenerateNode, message],
+    );
 
     const handleRetryNode = useCallback(
         async (node: CanvasNodeData) => {
@@ -2539,8 +2783,14 @@ function InfiniteCanvasPage() {
                     return;
                 }
                 if (node.type === CanvasNodeType.Audio) {
-                    const audio = await storeGeneratedAudio(await requestAudioGeneration(generationConfig, prompt, { signal: controller.signal }), generationConfig.audioFormat);
-                    setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, ...audioMetadata(audio), prompt, ...buildAudioGenerationMetadata(generationConfig) } } : item)));
+                    const generatedAudio = await requestAudioGeneration(generationConfig, prompt, { signal: controller.signal });
+                    const audio = await storeGeneratedAudio(generatedAudio.blob, generationConfig.audioFormat);
+                    const alignment = buildStoryboardAudioTimelineUpdates(nodesRef.current, node.metadata?.storyboardId, generatedAudio.timeline, audio.durationMs);
+                    setNodes((prev) => applyStoryboardAudioTimeline(prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, ...audioMetadata(audio, generatedAudio.timeline), ...narrationAlignmentMetadata(alignment), prompt, ...buildAudioGenerationMetadata(generationConfig) } } : item)), alignment));
+                    if (node.metadata?.storyboardId && generatedAudio.timeline?.words.length) {
+                        if (alignment?.matchedCount) message.success(`已将字词时间轴应用到 ${alignment.matchedCount}/${alignment.shotCount} 个视频分镜`);
+                        else message.warning(`字词时间轴已应用 0/${alignment?.shotCount || 0} 个分镜，请查看对齐状态`);
+                    }
                     return;
                 }
 
@@ -2765,7 +3015,7 @@ function InfiniteCanvasPage() {
 
     return (
         <main className="flex h-full min-h-0 overflow-hidden" style={{ background: theme.canvas.background, color: theme.node.text }}>
-            <CanvasSidePanel nodes={nodes} selectedNodeIds={selectedNodeIds} onFocusNode={focusNode} onInsertAsset={handleAssetInsert} />
+            <CanvasSidePanel nodes={nodes} selectedNodeIds={selectedNodeIds} onFocusNode={focusNode} onInsertAsset={handleAssetInsert} onComposeVideos={openVideoCompose} onBatchGenerate={runBatchGenerate} />
             <section className="relative min-w-0 flex-1 overflow-hidden">
                 <CanvasTopBar
                     title={currentProject?.title || "未命名画布"}
@@ -2997,13 +3247,31 @@ function InfiniteCanvasPage() {
                     config={effectiveConfig}
                     model={storyboardModel}
                     rewriteInstruction={storyboardRewrite}
+                    asrEnabled={storyboardAsrEnabled}
+                    localServiceConfig={composeServiceConfig}
+                    deepgramApiKey={storyboardDeepgramKey}
                     loading={storyboardLoading}
                     error={storyboardError}
                     onModelChange={setStoryboardModel}
                     onRewriteChange={setStoryboardRewrite}
+                    onAsrEnabledChange={setStoryboardAsrEnabled}
+                    onLocalServiceConfigChange={setComposeServiceConfig}
+                    onDeepgramApiKeyChange={setStoryboardDeepgramKey}
                     onSubmit={() => void runVideoStoryboard()}
                     onCancel={cancelVideoStoryboard}
                     onOpenConfig={() => openConfigDialog(false, "channels")}
+                />
+                <CanvasVideoComposeDialog
+                    open={composeVideos.length > 0}
+                    videos={composeVideos}
+                    narration={composeNarration}
+                    config={composeServiceConfig}
+                    loading={composeLoading}
+                    progress={composeProgress}
+                    error={composeError}
+                    onConfigChange={setComposeServiceConfig}
+                    onSubmit={() => void runVideoCompose()}
+                    onCancel={cancelVideoCompose}
                 />
                 <CanvasPluginManagerModal open={pluginManagerOpen} onClose={() => setPluginManagerOpen(false)} />
 

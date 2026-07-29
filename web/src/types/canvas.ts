@@ -25,6 +25,18 @@ export type CanvasNodeStatus = "idle" | "success" | "loading" | "error";
 export type CanvasGenerationMode = "text" | "image" | "video" | "audio";
 export type CanvasImageGenerationType = "generation" | "edit";
 
+export type AudioWordTimestamp = {
+    text: string;
+    startMs: number;
+    endMs: number;
+    confidence?: number;
+};
+
+export type AudioTimeline = {
+    text: string;
+    words: AudioWordTimestamp[];
+};
+
 export type CanvasNodeMetadata = {
     content?: string;
     composerContent?: string;
@@ -47,6 +59,25 @@ export type CanvasNodeMetadata = {
     audioFormat?: string;
     audioSpeed?: string;
     audioInstructions?: string;
+    audioTimeline?: AudioTimeline;
+    narrationText?: string;
+    sourceStartMs?: number;
+    sourceEndMs?: number;
+    sourceNarrationStartMs?: number;
+    sourceNarrationEndMs?: number;
+    sourceNarrationTimingSource?: "model" | "deepgram";
+    narrationStartMs?: number;
+    narrationEndMs?: number;
+    narrationAlignmentStatus?: "pending" | "matched" | "failed";
+    narrationAlignmentError?: string;
+    narrationAlignedCount?: number;
+    narrationShotCount?: number;
+    narrationAlignmentIssues?: Array<{ index: number; reason: string }>;
+    subtitleText?: string;
+    storyboardId?: string;
+    storyboardShotIndex?: number;
+    transitionText?: string;
+    timelineJson?: string;
     references?: string[];
     naturalWidth?: number;
     naturalHeight?: number;

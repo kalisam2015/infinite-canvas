@@ -43,7 +43,7 @@ export function buildNodeGenerationContext(nodeId: string, nodes: CanvasNodeData
     const referenceAudios = inputs.map((input) => input.audio).filter((audio): audio is ReferenceAudio => Boolean(audio));
 
     return {
-        prompt: upstreamText ? `${prompt}\n\n${upstreamText}` : prompt,
+        prompt: mergePromptWithUpstreamText(prompt, upstreamText),
         referenceImages,
         referenceVideos,
         referenceAudios,
@@ -52,6 +52,21 @@ export function buildNodeGenerationContext(nodeId: string, nodes: CanvasNodeData
         videoCount: referenceVideos.length,
         audioCount: referenceAudios.length,
     };
+}
+
+export function mergePromptWithUpstreamText(prompt: string, upstreamText: string) {
+    const upstream = upstreamText.trim();
+    const ownPrompt = stripUpstreamTextFromPrompt(prompt, upstream);
+    if (!upstream) return ownPrompt;
+    return ownPrompt ? `${ownPrompt}\n\n${upstream}` : upstream;
+}
+
+export function stripUpstreamTextFromPrompt(prompt: string, upstreamText: string) {
+    const upstream = upstreamText.trim();
+    let ownPrompt = prompt.trim();
+    if (!upstream) return ownPrompt;
+    while (ownPrompt.endsWith(upstream)) ownPrompt = ownPrompt.slice(0, -upstream.length).trimEnd();
+    return ownPrompt;
 }
 
 function buildComposerGenerationContext(inputs: NodeGenerationInput[], prompt: string): NodeGenerationContext {

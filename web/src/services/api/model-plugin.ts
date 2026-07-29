@@ -203,8 +203,8 @@ export const PLUGIN_RETURNS: Record<ModelCapability, string> = {
 
 export type PluginTemplate = { label: string; script: string };
 
-export const DOUBAO_VIDEO_ANALYSIS_SCRIPT = `// 豆包视频理解 Chat API：完整视频使用 video_url Base64 传入，不拆帧。
-// 可用：videos[0].blob、videos[0].name、prompt、model、baseUrl、apiKey、request
+export const DOUBAO_VIDEO_ANALYSIS_SCRIPT = `// 豆包视频理解 Chat API：完整视频使用 video_url Base64 传入，通过 SSE 流式返回避免长请求断开。
+// 可用：videos[0].blob、videos[0].name、prompt、model、baseUrl、apiKey、signal
 if (!videos.length) throw new Error("缺少视频输入");
 if (videos[0].size > 48 * 1024 * 1024) throw new Error("豆包 Base64 视频输入需小于 48 MB，请改用 Files API 或视频 URL");
 const fileData = await new Promise((resolve, reject) => {
@@ -213,11 +213,10 @@ const fileData = await new Promise((resolve, reject) => {
   reader.onerror = () => reject(reader.error || new Error("视频读取失败"));
   reader.readAsDataURL(videos[0].blob);
 });
-const data = await request({
-  method: "post",
-  url: \`\${baseUrl}/v1/chat/completions\`,
+const response = await fetch(\`\${baseUrl}/v1/chat/completions\`, {
+  method: "POST",
   headers: { "Content-Type": "application/json", Authorization: \`Bearer \${apiKey}\` },
-  data: {
+  body: JSON.stringify({
     model,
     messages: [{
       role: "user",
@@ -226,17 +225,131 @@ const data = await request({
         { type: "text", text: prompt },
       ],
     }],
-    max_tokens: 4096,
-  },
+    max_tokens: 16384,
+    stream: true,
+  }),
+  signal,
 });
-const content = data.choices?.[0]?.message?.content;
-const text = typeof content === "string" ? content : Array.isArray(content) ? content.map((item) => item.text || "").join("") : "";
-if (!text) throw new Error(\`豆包 Chat API 未返回文本：\${JSON.stringify(data).slice(0, 1000)}\`);
+if (!response.ok) {
+  const detail = (await response.text()).slice(0, 1000);
+  throw new Error(\`豆包请求失败 \${response.status}：\${detail || response.statusText}\`);
+}
+const readContent = (content) => {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.map((item) => typeof item === "string" ? item : typeof item?.text === "string" ? item.text : item?.text?.value || "").join("");
+};
+if (!(response.headers.get("content-type") || "").includes("text/event-stream")) {
+  const data = await response.json();
+  const choice = data.choices?.[0];
+  if (choice?.finish_reason === "length") throw new Error("豆包输出达到长度上限，JSON 未完整生成，请缩短视频后重试");
+  const text = readContent(choice?.message?.content);
+  if (!text) throw new Error(\`豆包 Chat API 未返回文本：\${JSON.stringify(data).slice(0, 1000)}\`);
+  return text;
+}
+if (!response.body) throw new Error("豆包流式响应缺少可读取内容");
+const reader = response.body.getReader();
+const decoder = new TextDecoder();
+let buffer = "";
+let text = "";
+let finishReason = "";
+const consume = (line) => {
+  const value = line.trim();
+  if (!value.startsWith("data:")) return;
+  const payload = value.slice(5).trim();
+  if (!payload || payload === "[DONE]") return;
+  try {
+    const event = JSON.parse(payload);
+    const choice = event.choices?.[0];
+    if (typeof choice?.finish_reason === "string") finishReason = choice.finish_reason;
+    text += readContent(choice?.delta?.content ?? choice?.message?.content ?? choice?.text);
+  } catch {
+    // 忽略心跳或非 JSON SSE 事件。
+  }
+};
+for (;;) {
+  const chunk = await reader.read();
+  buffer += decoder.decode(chunk.value || new Uint8Array(), { stream: !chunk.done });
+  const lines = buffer.split(/\\r?\\n/);
+  buffer = lines.pop() || "";
+  lines.forEach(consume);
+  if (chunk.done) break;
+}
+consume(buffer);
+if (finishReason === "length") throw new Error("豆包输出达到长度上限，JSON 未完整生成，请缩短视频后重试");
+if (!text) throw new Error("豆包流式请求未返回文本");
 return text;`;
 
 export function defaultVideoAnalysisScriptForModel(modelName: string) {
     return /doubao/i.test(modelName) ? DOUBAO_VIDEO_ANALYSIS_SCRIPT : "";
 }
+
+export const DOUBAO_AUDIO_SCRIPT = `// 豆包语音合成（HTTP 单向流式 v3）：https://openspeech.bytedance.com/api/v3/tts/unidirectional
+// 音色 ID（如 zh_female_vv_uranus_bigtts）填在“声音指令”里；voice/format 下拉框对豆包不生效，仅 params.instructions 生效。
+// 可用：prompt、params{instructions,format}、apiKey、signal
+const speaker = (params.instructions || "").trim();
+if (!speaker) throw new Error("请在“声音指令”里填写豆包音色 ID，例如 zh_female_vv_uranus_bigtts");
+const format = params.format === "wav" || params.format === "pcm" ? params.format : "mp3";
+const response = await fetch("https://openspeech.bytedance.com/api/v3/tts/unidirectional", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    "X-Api-Key": apiKey,
+    "X-Api-Resource-Id": "seed-tts-2.0",
+  },
+  body: JSON.stringify({
+    req_params: {
+      text: prompt,
+      speaker,
+      audio_params: { format, sample_rate: 24000, enable_subtitle: true },
+    },
+  }),
+  signal,
+});
+if (!response.ok) {
+  const detail = (await response.text()).slice(0, 1000);
+  throw new Error(\`豆包语音合成请求失败 \${response.status}：\${detail || response.statusText}\`);
+}
+if (!response.body) throw new Error("豆包语音合成响应缺少可读取内容");
+const reader = response.body.getReader();
+const decoder = new TextDecoder();
+let buffer = "";
+const chunks = [];
+const sentences = [];
+let done = false;
+let errorMessage = "";
+const consume = (line) => {
+  const value = line.trim();
+  if (!value) return;
+  let event;
+  try {
+    event = JSON.parse(value);
+  } catch {
+    return; // 忽略无法解析的行
+  }
+  if (event.sentence && typeof event.sentence === "object") sentences.push(event.sentence);
+  if (event.code === 20000000) { done = true; return; }
+  if (typeof event.code === "number" && event.code !== 0) { errorMessage = event.message || \`豆包语音合成失败（code \${event.code}）\`; return; }
+  if (typeof event.data === "string" && event.data) chunks.push(event.data);
+};
+for (;;) {
+  const chunk = await reader.read();
+  buffer += decoder.decode(chunk.value || new Uint8Array(), { stream: !chunk.done });
+  const lines = buffer.split(/\\r?\\n/);
+  buffer = lines.pop() || "";
+  lines.forEach(consume);
+  if (chunk.done) break;
+}
+consume(buffer);
+if (errorMessage) throw new Error(errorMessage);
+if (!chunks.length) throw new Error(done ? "豆包语音合成未返回音频数据" : "豆包语音合成响应被中断");
+const binary = atob(chunks.join(""));
+const bytes = new Uint8Array(binary.length);
+for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+return {
+  audio: new Blob([bytes], { type: format === "wav" ? "audio/wav" : format === "pcm" ? "audio/pcm" : "audio/mpeg" }),
+  timeline: { text: prompt, sentences },
+};`;
 
 export const PLUGIN_TEMPLATES: Record<ModelCapability, PluginTemplate[]> = {
     image: [
@@ -348,6 +461,10 @@ return await request({
   responseType: "blob",
   data: { model, input: prompt, voice: params.voice, response_format: params.format, speed: Number(params.speed) },
 });`,
+        },
+        {
+            label: "豆包语音合成",
+            script: DOUBAO_AUDIO_SCRIPT,
         },
         {
             label: "Gemini 规范",

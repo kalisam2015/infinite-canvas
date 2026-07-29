@@ -3,7 +3,8 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { nanoid } from "nanoid";
 
-export type ApiCallFormat = "openai" | "gemini";
+export type ApiCallFormat = "openai" | "gemini" | "seedance";
+export type AudioCallMode = "openai" | "volcengine-v3";
 export type ModelCapability = "image" | "video" | "text" | "audio" | "video-analysis";
 
 export type ChannelModel = {
@@ -11,6 +12,7 @@ export type ChannelModel = {
     capability: ModelCapability;
     script?: string;
     videoAnalysisScript?: string;
+    audioMode?: AudioCallMode;
 };
 
 export type ModelChannel = {
@@ -64,6 +66,7 @@ export const CONFIG_STORE_KEY = "infinite-canvas:ai_config_store";
 const CHANNEL_MODEL_SEPARATOR = "::";
 const OPENAI_BASE_URL = "https://api.openai.com";
 const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
+const SEEDANCE_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3";
 
 export const defaultConfig: AiConfig = {
     channelMode: "local",
@@ -173,6 +176,10 @@ export function resolveModelScript(config: AiConfig, value: string) {
     return findChannelModel(config, value)?.model.script?.trim() || "";
 }
 
+export function resolveAudioCallMode(config: AiConfig, value: string): AudioCallMode {
+    return findChannelModel(config, value)?.model.audioMode === "volcengine-v3" ? "volcengine-v3" : "openai";
+}
+
 export function resolveVideoAnalysisScript(config: AiConfig, value: string) {
     const model = findChannelModel(config, value)?.model;
     return model?.videoAnalysisScript?.trim() || (model?.capability === "video-analysis" ? model.script?.trim() || "" : "");
@@ -267,7 +274,8 @@ export function normalizeChannelModels(models: Array<string | ChannelModel> | un
         const capability = typeof item === "string" ? guessCapability(name) : item.capability || guessCapability(name);
         const script = typeof item === "string" ? undefined : item.script?.trim() || undefined;
         const videoAnalysisScript = typeof item === "string" ? undefined : item.videoAnalysisScript?.trim() || undefined;
-        result.push({ name, capability, script, videoAnalysisScript });
+        const audioMode = typeof item === "string" || item.audioMode !== "volcengine-v3" ? undefined : item.audioMode;
+        result.push({ name, capability, script, videoAnalysisScript, audioMode });
     }
     return result;
 }
@@ -369,22 +377,26 @@ function normalizeChannels(config: AiConfig) {
 }
 
 export function defaultBaseUrlForApiFormat(apiFormat: ApiCallFormat) {
-    return apiFormat === "gemini" ? GEMINI_BASE_URL : OPENAI_BASE_URL;
+    return apiFormat === "gemini" ? GEMINI_BASE_URL : apiFormat === "seedance" ? SEEDANCE_BASE_URL : OPENAI_BASE_URL;
 }
 
 function normalizeApiFormat(apiFormat: unknown): ApiCallFormat {
-    return apiFormat === "gemini" ? "gemini" : "openai";
+    return apiFormat === "gemini" || apiFormat === "seedance" ? apiFormat : "openai";
 }
 
 function uniqueModelOptions(models: string[]) {
     return Array.from(new Set((models || []).map((model) => model.trim()).filter(Boolean)));
 }
 
-export function buildApiUrl(baseUrl: string, path: string) {
+export function buildApiUrl(baseUrl: string, path: string, apiFormat: ApiCallFormat = "openai") {
     let normalizedBaseUrl = baseUrl.trim().replace(/\/+$/, "");
     normalizedBaseUrl = normalizeArkPlanBaseUrl(normalizedBaseUrl);
     const lowerBaseUrl = normalizedBaseUrl.toLowerCase();
-    const apiBaseUrl = lowerBaseUrl.endsWith("/v1") || lowerBaseUrl.endsWith("/api/v3") || lowerBaseUrl.endsWith("/api/plan/v3") ? normalizedBaseUrl : `${normalizedBaseUrl}/v1`;
+    if (lowerBaseUrl.endsWith("/api/plan/v3")) return `${normalizedBaseUrl}${path}`;
+    const currentVersionPath = ["/api/v3", "/v1beta", "/v1"].find((value) => lowerBaseUrl.endsWith(value));
+    const baseRoot = currentVersionPath ? normalizedBaseUrl.slice(0, -currentVersionPath.length) : normalizedBaseUrl;
+    const versionPath = apiFormat === "seedance" ? "/api/v3" : apiFormat === "gemini" ? "/v1beta" : "/v1";
+    const apiBaseUrl = `${baseRoot}${versionPath}`;
     return `${apiBaseUrl}${path}`;
 }
 

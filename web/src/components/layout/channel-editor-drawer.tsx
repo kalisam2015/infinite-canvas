@@ -2,13 +2,14 @@ import { Button, Drawer, Input, Segmented, Select, Space } from "antd";
 import { ListPlus, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 
-import { defaultBaseUrlForApiFormat, guessCapability, normalizeChannelModels, type ApiCallFormat, type ChannelModel, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
+import { defaultBaseUrlForApiFormat, guessCapability, normalizeChannelModels, type ApiCallFormat, type AudioCallMode, type ChannelModel, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
 import { ModelScriptEditor } from "./model-script-editor";
 import { ModelSelectModal } from "./model-select-modal";
 
 const apiFormatOptions: Array<{ label: string; value: ApiCallFormat }> = [
     { label: "OpenAI", value: "openai" },
     { label: "Gemini", value: "gemini" },
+    { label: "Seedance", value: "seedance" },
 ];
 
 const capabilityOptions: Array<{ label: string; value: ModelCapability }> = [
@@ -17,6 +18,11 @@ const capabilityOptions: Array<{ label: string; value: ModelCapability }> = [
     { label: "视频理解", value: "video-analysis" },
     { label: "文本", value: "text" },
     { label: "音频", value: "audio" },
+];
+
+const audioModeOptions: Array<{ label: string; value: AudioCallMode }> = [
+    { label: "OpenAI 兼容", value: "openai" },
+    { label: "V3 时间戳", value: "volcengine-v3" },
 ];
 
 type ScriptTarget = {
@@ -51,6 +57,7 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
     };
 
     const setCapability = (name: string, capability: ModelCapability) => setModels(draft.models.map((model) => (model.name === name ? { ...model, capability } : model)));
+    const setAudioMode = (name: string, audioMode: AudioCallMode) => setModels(draft.models.map((model) => (model.name === name ? { ...model, audioMode: audioMode === "openai" ? undefined : audioMode } : model)));
     const setScript = (name: string, field: ScriptTarget["field"], script: string) => setModels(draft.models.map((model) => (model.name === name ? { ...model, [field]: script || undefined } : model)));
     const removeModel = (name: string) => setModels(draft.models.filter((model) => model.name !== name));
 
@@ -113,6 +120,7 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
                             </span>
                             <div className="flex shrink-0 items-center gap-2">
                                 <Segmented size="small" value={model.capability} options={capabilityOptions} onChange={(value) => setCapability(model.name, value as ModelCapability)} />
+                                {model.capability === "audio" ? <Select size="small" className="w-32" value={model.audioMode || "openai"} options={audioModeOptions} onChange={(value) => setAudioMode(model.name, value)} /> : null}
                                 <Button size="small" type={model.script ? "primary" : "default"} ghost={Boolean(model.script)} onClick={() => setScriptTarget({ name: model.name, capability: model.capability, value: model.script || "", field: "script" })}>
                                     {model.script ? "脚本已设" : "调用脚本"}
                                 </Button>

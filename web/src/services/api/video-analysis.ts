@@ -15,8 +15,9 @@ titles：标题数组
 hashtags：话题标签数组
 shots：按时间排序的镜头数组
 
-每个 shots 项必须包含：startMs、endMs、visual、camera、action、dialogue、narration、subtitle、soundEffect、transition、generationPrompt、videoParams。每个镜头控制在 2-15 秒，优先按真实转场、动作或台词段落拆分。
-时间码使用毫秒。generationPrompt 必须能直接用于 AI 视频生成。videoParams 可包含 size、resolution、generateAudio、watermark。`;
+每个 shots 项必须包含：startMs、endMs、visual、camera、action、dialogue、narration、sourceNarrationStartMs、sourceNarrationEndMs、subtitle、soundEffect、transition、generationPrompt、videoParams。每个镜头控制在 4-15 秒，优先按真实转场、动作或台词段落拆分。
+必须同时分析画面和原始音轨。镜头内只要听到可辨识的人声口播，dialogue 或 narration 就不得为空，并填写相对原视频起点的 sourceNarrationStartMs、sourceNarrationEndMs；没有人声时两个字段返回 null。不要把封面页、静态画面或背景音乐误判为没有口播。
+所有时间码使用毫秒。generationPrompt 必须能直接用于 AI 视频生成。videoParams 可包含 size、resolution、generateAudio、watermark。`;
 
 export async function analyzeVideoStoryboard(config: AiConfig, node: CanvasNodeData, options?: { model?: string; rewriteInstruction?: string; signal?: AbortSignal }) {
     const model = options?.model || config.videoAnalysisModel;

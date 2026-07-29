@@ -1,7 +1,7 @@
 import { memo, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { App, Empty, Input, Popconfirm, Select, Spin, Tag } from "antd";
 import { useQuery } from "@tanstack/react-query";
-import { BookOpen, Check, ChevronRight, Download, Eye, FileText, Image as ImageIcon, ListChecks, Music2, Plus, Search, Settings2, Square, Trash2, Type, Video } from "lucide-react";
+import { BookOpen, Check, ChevronRight, Download, Eye, FileText, Film, Image as ImageIcon, ListChecks, Music2, Play, Plus, Search, Settings2, Square, Trash2, Type, Video } from "lucide-react";
 import { motion } from "motion/react";
 
 import { canvasThemes, type CanvasTheme } from "@/lib/canvas-theme";
@@ -31,6 +31,8 @@ type Props = {
     selectedNodeIds: Set<string>;
     onFocusNode: (nodeId: string) => void;
     onInsertAsset: (payload: InsertAssetPayload) => void;
+    onComposeVideos: (nodes: CanvasNodeData[]) => void;
+    onBatchGenerate: (nodes: CanvasNodeData[]) => void;
 };
 
 const NODE_TYPE_ICON: Record<string, typeof Square> = {
@@ -49,7 +51,7 @@ const STATUS_COLOR: Record<string, string> = {
     idle: "transparent",
 };
 
-export function CanvasSidePanel({ nodes, selectedNodeIds, onFocusNode, onInsertAsset }: Props) {
+export function CanvasSidePanel({ nodes, selectedNodeIds, onFocusNode, onInsertAsset, onComposeVideos, onBatchGenerate }: Props) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const [tab, setTab] = useState<PanelTab>("canvas");
     const width = useCanvasSidePanelStore((state) => state.width);
@@ -104,7 +106,7 @@ export function CanvasSidePanel({ nodes, selectedNodeIds, onFocusNode, onInsertA
                 </div>
                 <div className="mt-2 min-h-0 flex-1 overflow-hidden">
                     {tab === "canvas" ? (
-                        <CanvasNodesTab nodes={nodes} selectedNodeIds={selectedNodeIds} onFocusNode={onFocusNode} theme={theme} />
+                        <CanvasNodesTab nodes={nodes} selectedNodeIds={selectedNodeIds} onFocusNode={onFocusNode} onComposeVideos={onComposeVideos} onBatchGenerate={onBatchGenerate} theme={theme} />
                     ) : tab === "assets" ? (
                         <CanvasAssetsTab onInsert={onInsertAsset} theme={theme} />
                     ) : (
@@ -145,7 +147,7 @@ function nodePreviewText(node: CanvasNodeData) {
     return getNodeDefinition(node.type)?.title || node.type;
 }
 
-function CanvasNodesTab({ nodes, selectedNodeIds, onFocusNode, theme }: { nodes: CanvasNodeData[]; selectedNodeIds: Set<string>; onFocusNode: (nodeId: string) => void; theme: CanvasTheme }) {
+function CanvasNodesTab({ nodes, selectedNodeIds, onFocusNode, onComposeVideos, onBatchGenerate, theme }: { nodes: CanvasNodeData[]; selectedNodeIds: Set<string>; onFocusNode: (nodeId: string) => void; onComposeVideos: (nodes: CanvasNodeData[]) => void; onBatchGenerate: (nodes: CanvasNodeData[]) => void; theme: CanvasTheme }) {
     const { message } = App.useApp();
     const [keyword, setKeyword] = useState("");
     const [typeFilter, setTypeFilter] = useState<string>("all");
@@ -170,6 +172,10 @@ function CanvasNodesTab({ nodes, selectedNodeIds, onFocusNode, theme }: { nodes:
         });
     const allChecked = filtered.length > 0 && filtered.every((node) => checked.has(node.id));
     const toggleAll = () => setChecked(allChecked ? new Set() : new Set(filtered.map((node) => node.id)));
+    const composeTargets = nodes.filter((node) => checked.has(node.id) && node.type === CanvasNodeType.Video && Boolean(node.metadata?.content));
+    const narrationTargets = nodes.filter((node) => checked.has(node.id) && node.type === CanvasNodeType.Audio && Boolean(node.metadata?.content));
+    const composeMediaTargets = [...composeTargets, ...narrationTargets];
+    const generateTargets = nodes.filter((node) => checked.has(node.id) && node.type === CanvasNodeType.Config);
 
     const handleExport = async () => {
         const targets = nodes.filter((node) => checked.has(node.id));
@@ -242,21 +248,43 @@ function CanvasNodesTab({ nodes, selectedNodeIds, onFocusNode, theme }: { nodes:
                 )}
             </div>
             {selectMode ? (
-                <div className="flex items-center gap-2 border-t px-3 py-2.5" style={{ borderColor: theme.toolbar.border }}>
-                    <button type="button" onClick={toggleAll} className="rounded-md px-2 py-1 text-xs font-medium opacity-70 transition hover:bg-black/5 hover:opacity-100 dark:hover:bg-white/10">
-                        {allChecked ? "取消全选" : "全选"}
-                    </button>
-                    <span className="text-xs opacity-45">已选 {checked.size}</span>
-                    <button
-                        type="button"
-                        onClick={() => void handleExport()}
-                        disabled={!checked.size || exporting}
-                        className="ml-auto flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition hover:bg-black/5 disabled:cursor-not-allowed disabled:opacity-40 dark:hover:bg-white/10"
-                        style={{ color: theme.node.text }}
-                    >
-                        <Download className="size-3.5" />
-                        导出选中
-                    </button>
+                <div className="space-y-1 border-t px-3 py-2" style={{ borderColor: theme.toolbar.border }}>
+                    <div className="flex items-center gap-2">
+                        <button type="button" onClick={toggleAll} className="rounded-md px-2 py-1 text-xs font-medium opacity-70 transition hover:bg-black/5 hover:opacity-100 dark:hover:bg-white/10">
+                            {allChecked ? "取消全选" : "全选"}
+                        </button>
+                        <span className="text-xs opacity-45">已选 {checked.size}</span>
+                    </div>
+                    <div className="flex items-center justify-end gap-1">
+                        <button
+                            type="button"
+                            onClick={() => onBatchGenerate(generateTargets)}
+                            disabled={!generateTargets.length || exporting}
+                            className="flex items-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-semibold transition hover:bg-black/5 disabled:cursor-not-allowed disabled:opacity-35 dark:hover:bg-white/10"
+                        >
+                            <Play className="size-3.5" />
+                            批量生成
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => onComposeVideos(composeMediaTargets)}
+                            disabled={composeTargets.length < 2 || exporting}
+                            className="flex items-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-semibold transition hover:bg-black/5 disabled:cursor-not-allowed disabled:opacity-35 dark:hover:bg-white/10"
+                        >
+                            <Film className="size-3.5" />
+                            合并视频
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => void handleExport()}
+                            disabled={!checked.size || exporting}
+                            className="flex items-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-semibold transition hover:bg-black/5 disabled:cursor-not-allowed disabled:opacity-40 dark:hover:bg-white/10"
+                            style={{ color: theme.node.text }}
+                        >
+                            <Download className="size-3.5" />
+                            导出选中
+                        </button>
+                    </div>
                 </div>
             ) : null}
         </div>

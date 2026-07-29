@@ -106,6 +106,8 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
                 ) : null}
             </div>
 
+            {mode === "video" && node.metadata?.storyboardId && (node.metadata.sourceStartMs !== undefined || node.metadata.narrationAlignmentStatus) ? <NarrationAlignmentSummary node={node} /> : null}
+
             <Button
                 type="primary"
                 className="mt-auto !h-9 !w-full !cursor-pointer !rounded-lg"
@@ -131,6 +133,35 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
             </Button>
         </div>
     );
+}
+
+function NarrationAlignmentSummary({ node }: { node: CanvasNodeData }) {
+    const metadata = node.metadata;
+    const sourceRange = formatRange(metadata?.sourceStartMs, metadata?.sourceEndMs);
+    const sourceNarration = formatRange(metadata?.sourceNarrationStartMs, metadata?.sourceNarrationEndMs);
+    const sourceTimingLabel = sourceNarration === "--" ? "未识别" : metadata?.sourceNarrationTimingSource === "deepgram" ? "Deepgram 校准" : "模型估算";
+    const narrationRange = formatRange(metadata?.narrationStartMs, metadata?.narrationEndMs);
+    const clipMs = metadata?.narrationStartMs !== undefined && metadata.narrationEndMs !== undefined ? metadata.narrationEndMs - metadata.narrationStartMs : metadata?.sourceStartMs !== undefined && metadata.sourceEndMs !== undefined ? metadata.sourceEndMs - metadata.sourceStartMs : undefined;
+    const status = metadata?.narrationAlignmentStatus === "matched" ? "已匹配" : metadata?.narrationAlignmentStatus === "failed" ? `匹配失败${metadata.narrationAlignmentError ? `：${metadata.narrationAlignmentError}` : ""}` : "等待生成旁白";
+    return (
+        <div className="mb-2 space-y-1 border-y py-2 text-[11px] leading-4 opacity-65">
+            <div>原片 {sourceRange} · 口播 {sourceNarration}（{sourceTimingLabel}）</div>
+            <div>新旁白 {narrationRange} · 剪辑 {clipMs === undefined ? "--" : `${(clipMs / 1000).toFixed(2)}s`} · 生成 {metadata?.seconds || "--"}s</div>
+            <div>{status}</div>
+        </div>
+    );
+}
+
+function formatRange(startMs: number | undefined, endMs: number | undefined) {
+    return startMs === undefined || endMs === undefined ? "--" : `${formatTimestamp(startMs)}-${formatTimestamp(endMs)}`;
+}
+
+function formatTimestamp(value: number) {
+    const total = Math.max(0, Math.round(value));
+    const minutes = Math.floor(total / 60000);
+    const seconds = Math.floor((total % 60000) / 1000);
+    const millis = total % 1000;
+    return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${String(millis).padStart(3, "0")}`;
 }
 
 function InputChip({ label, value, style }: { label: string; value: string; style: CSSProperties }) {
