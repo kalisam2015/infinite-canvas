@@ -5,6 +5,8 @@ description: 当前版本已实现但仍需人工验证的变更项
 
 # 待测试
 
+- 页面启动与视频服务：刷新首页、画布或视频创作台后应正常显示，不得因 `seedance-video` 缺少 `isArkPlanBaseUrl` 或 `isSeedanceVideoModel` 导出而出现黑屏；使用 Ark Plan 地址和 Seedance 模型创建视频任务时，任务路由应继续正常工作。
+
 - Windows 本地视频合并下载诊断：选择多个已生成视频并开始合并时，片段应按顺序读取并在读取阶段显示进度；任一片段读取失败时，应明确显示对应的片段序号。若浏览器无法连接本地媒体服务，应显示本地服务地址，而不是只显示 `Failed to fetch`。
 
 - Seedance 渠道协议：在渠道编辑器中应可选择 `Seedance` 协议，新建该协议渠道时默认接口地址为 `https://ark.cn-beijing.volces.com/api/v3`，也可填写 `http://127.0.0.1:3001` 这类实现同协议透传的中转裸地址；程序应按 Seedance 协议自动补 `/api/v3`，最终调用 `/api/v3/contents/generations/tasks`，不得错误补成 `/v1/contents/generations/tasks`。请求包含 `content`、`ratio`、`resolution`、`duration`、`generate_audio` 和 `watermark`；普通视频配置的“生成声音”开关应映射到 `generate_audio`，视频反推创建的分镜配置应固定发送 `generate_audio: false`。选择 `OpenAI` 协议时继续走 `/v1/videos` 兼容链路，不应假设支持 Seedance 原生声音字段。

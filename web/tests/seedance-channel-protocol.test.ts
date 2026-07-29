@@ -24,7 +24,7 @@ test("adds the version path required by each channel protocol", () => {
 
 test("shows Seedance in channel protocol selectors and summaries", () => {
     assert.match(editorSource, /label:\s*"Seedance"[^\n]+value:\s*"seedance"/);
-    assert.match(configModalSource, /apiFormat === "seedance"\s*\?\s*"Seedance"/);
+    assert.match(configModalSource, /apiFormat === "seedance"\) return "Seedance"/);
 });
 
 test("routes Seedance channels to the native task API with an explicit audio flag", () => {

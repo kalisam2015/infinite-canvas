@@ -62,6 +62,15 @@ export function isSeedanceVideoConfig(config: AiConfig | Pick<AiConfig, "model" 
     return requestConfig.apiFormat === "seedance" || requestConfig.apiFormat === "ark";
 }
 
+export function isSeedanceVideoModel(model: string) {
+    const value = model.toLowerCase();
+    return value.includes("seedance") || value.includes("doubao-seedance");
+}
+
+export function isArkPlanBaseUrl(baseUrl: string) {
+    return baseUrl.toLowerCase().includes("ark.cn-beijing.volces.com/api/plan/v3") || baseUrl.toLowerCase().includes("/api/plan/v3");
+}
+
 export function normalizeSeedanceResolution(value: string) {
     const normalized = normalizeResolutionToken(value);
     return seedanceResolutionOptions.some((item) => item.value === normalized) ? normalized : "720p";
